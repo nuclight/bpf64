@@ -1,0 +1,101 @@
+#include "nuc_ts_incr.bah"
+
+/* C preprocessor is used */
+
+#define TCPOPT_TS_KIND 8  /* Timestamp option has Kind=8 */ 
+#define TCPOPT_TS_LEN 10  /* and length 10, per RFC 1323 */
+
+#define LOG bpf64_printf
+
+/* helpers to make printing less tedious */
+#define LOG1(fmt, arg1)	printarg = arg1; LOG(fmt, printarg);
+#define LOG2(fmt, arg1, arg2)		\
+	printarg1 = arg1;		\
+	printarg2 = arg2;		\
+	LOG(fmt, printarg1, printarg2);
+
+func rec2stat(error)	/* one input register */
+local value;		/* and one local register */
+{
+	if error > STAT_MAX
+		goto fail;
+	X = error;		/* offset can be only in index registers */
+	value = DS:P[X:8];	/* get current value to local register */
+	R1 += 1;		/* it's just alias, actual register will work */
+	DS:P[X:dw] = value;
+ok:
+	return 1;
+fail:
+	return 0;
+}
+
+/*** Comments about higher-level logic with 3 '*'s */
+
+func parse_ipv4(nh_pos, l4_off)
+local iphofs, data_end;
+out error printarg;	/* no comma - aliases to same register */
+{
+	LOG1("parse_ipv4: nh_pos=%d\n", nh_pos);
+
+	data_end = P.len; /* load length of packet */
+	/* 
+	 * Instead of dereferencing X manually as in rec2stat(), we can
+	 * put syntax construction backed by local variable (register),
+	 * which will assign X for us onevery use, so init just once.
+	 */
+	X = nh_pos;
+	index iph using ip4hdr take X store in iphofs;
+
+	/*** Error-checking packet: length of fixed header */
+	B = nh_pos;	/* save some stack by global register */
+	B += sizeof ip4hdr; /* note it doesn't know about alignment */
+	if B > data_end {
+		LOG("parse_ipv4: iphdr+20 past end of pkt\n");
+		/* Call may be done via prepared arguments (registers) */
+		error = STAT_IPHDRSHORT;
+		call rec2stat(); /* 'call' and args are optional */
+		return 0;
+	}
+
+	/*** Error-checking packet: total length field */
+	B = P[iph.tot_len];	/* tracked index here will do */
+				/* X = iphofs; */
+				/* B = P[X+2:2] */
+	C = B;		/* leave B for printf */
+	C += nh_pos;
+	if C > data_end {
+		LOG("parse_ipv4: tot_len=%d\n", B);
+		/* Note function call with args will generate assignments */
+		/* to output registers, so you may simply write: */
+		rec2stat(STAT_IPTOTSHORT);
+		return 0;
+	}
+
+	/*** Error-checking packet: IHL field */
+	B = iph.ihl; /* for fixed offset P[] is unnecessary */
+	if B < 5 {
+		LOG("parse_ipv4: ihl=%d\n", B);
+		rec2stat(STAT_IPHDRSHORT);
+		return 0;
+	}
+
+	/* l4_off = 20 + 4*(iph->ihl - 5); */
+	B -= 5; B *= 4; B += 20;
+	l4_off = B;
+	LOG("parse_ipv4: l4_off:=%d\n", l4_off);
+
+	/*** Error-checking packet: IHL field & real length */
+	B += nh_pos; /* if (*nh_pos + *l4_off > data_end) */
+	if B > data_end {
+		rec2stat(STAT_IPHDRSHORT);
+		return 0;
+	}
+	
+	/* return values are: Accumulator and l4_off */
+	A = iph.protocol;
+	return A; 
+
+}
+
+/* TODO rewrite other nuc_ts_prog_kern.c code below this point */
+
