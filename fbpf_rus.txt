@@ -195,6 +195,7 @@ BPF_LOOP_END - единственный собственно (условный) 
 
 с сего момента редактируемый черновик спеки, без отдельных записей дат по дням
 
+To: freebsd-arch, freebsd-hackers, tcpdump-workers, XXX
 Subject: BPF64: proposal of platform-independent hardware-friendly eBPF alternative
 
 Hello!
@@ -263,7 +264,18 @@ a context, instead of hardcoded enums of functions - for example, BPF maps is
 not something universal, both NetBSD and FreeBSD have their own tables in
 firewall.
 
+Add more features actually needed for *network* processor - e.g. 128-bit
+registers for IPv6 (eBPF axed put even BPF_MSH!). And do all of this in fully
+backwards-compatible way - new language should allow to run older programs
+from e.g. `tcpdump` to run without any modifications, binary-compatible
+(again, eBPF does not do this)
+
 TODO
+
+very complex ELF infrastructure which may be not suitable for every network
+card - having pc-addressed literals, as in RISC processors allows for much
+simpler format: just BLOB of instructions
+
 
 
 > First, a BPF program using bpf_trace_printk() has to have a GPL-compatible license.
