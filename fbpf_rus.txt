@@ -1,0 +1,1471 @@
+04.07.24 14:09:03
+возникла идея, как можно расширить классический BPF без верификатора - всё равно в нашем BSD-коде он ходит в mbuf, а в eBPF по факту нужны проверки указателя на каждый чих, поэтому оставить доступ к пакету как и было, добавить BPF_CALL и BPF_RET, stack frame на 16 слов по 64 бита, среди них read only Loop Counter для BPF_LOOP, который только декрементит счетчик и единственный разрешенный jump назад - все остальные только вперёд; ну еще BPF_SYSCALL добавить для внешних функций, подумать насчёт дополнительных областей памяти и деталей реализации BPF_LOOP (да, только один nested на функцию, но break/continue/jump изнутри что делать?), а также exception handlers (за пределы пакета, stack overflow и т.д.) - и всё, сложный верификатор не нужен, программа гарантировано завершится и имеет доступ только к разрешенным областям памяти. А поскольку это виртуальная машина, то JIT тоже имеет доступ только туда
+===
+12.07.24
+в продолжение идеи про расширение BPF, смотрел, как устроены по числу регистров ARM, MIPS, SPARC - этот интереснее всего, register window
+также в NetBSD посмотрел: там в BPF_MISC есть BPF_COP, типа coprocessor - это вызов внешней функции¸ используется их файрволом NPF, там еще BPF_MEMWORDS  расширены до extwords, и одна из внешних функций этого файрвола кладёт в три слова в MEM параметры пакета типа l4 offset, а другая делает лукап по таблице - ну вот он, зачаток eBPF maps
+===
+13.07.24
+снова расширение fBPF - читал про Itanium, там переменное регистровое окно, вот это похоже то, что нужно
+https://devblogs.microsoft.com/oldnewthing/20150729-00/?p=90801
+===
+14.07.24
+для ALU в старший байт надо: 5 бит override register и флаги - бит DW, бит Signed, бит Three_regs для взятия jt и jf, например:
+BPF_ALU+BPF_ADD+BPF_X      A <- A + X
+при override=3 это         D <- D + X
+override=3 T=1 jt=5 jf=6   F <- G + D
+
+а может несколько loop counter на stack frame держать? и назвать I,J,K как в Fortran
+ну да, если на ARM64 только 31 регистр, плюс если один всегда zero, плюс надо где-то держать X, то остается только 29 general purpose регистров, а если JIT-коду надо держать указатели на стек, на пакет, на что там еще...
+===
+16.07.24
+читал про ассемблер ARM64, мало того что FP и LR заняты, так еще и X18 под Platform... и режимом адресации всего ничего, [регистр+регистр*shift] по сути, то есть на каждый чих - пакет, shared, контекст, стэк основной, стэк спрятанный - надо держать по регистру, а то и по два, на смещение, и еще временные регистры для загрузки оттуда могут понадобиться?..
+
+а может, не мапить тогда стэк на регистры, а сделать его явным в BPF_MODE типа BPF_IND? тогда и Z <- I[k] и L[k] и O[k] можно раздельные
+===
+17.07.24
+в RISC-V вместо MOV просто частный случай ADD - похоже с BPF_ALU выходит так же
+инструкция на alloc таки нужна - иначе это в каждом call повторять придётся; плюс для main тоже позволит задать регистры - чтобы не инициализировать лишние
+===
+18.07.24
+инструкции расширенной длины в BPF_MISC - флаг M и оффсет (как IP fragments), в каждой из инструкций - на случай случайного джампа
+можно использовать, например, в аппаратной реализации в сетевухах для загрузки IPv6 в 128-битный регистр
+а первое применение - строковый литерал, и старший байт code в промежуточных - битовая маска, перед какими символами вставить %
+
+https://www.usenix.org/legacy/events/bsdcon02/full_papers/lidl/lidl.pdf :
+<<
+5.5 Stackable Filters
+Each filtering point in the kernel is actually the attachment point for a stack of ﬁlter programs. Filter programs
+can easily be pushed onto the stack, popped off the stack,
+or inserted into the middle of the stack for each filtering
+point. Individual filters each have a priority (a signed 32
+bit number) that determines where the in the stack the
+filter is actually placed. Multiple filters installed at the
+same priority, at the same filtering location, operate as a
+traditional stack.
+
+Filters may also have a symbolic tag to aid in their
+identification, replacement, or deletion.
+
+5.6 Flexibility of Actions
+
+After classifying a packet according to whatever rules
+are in place, a packet filtering system has to perform an
+operation on the packet. A simple packet filtering system has just two operations, “accept” and “reject.” The
+BSD/OS IPFW system has three additional operations.
+The `log` action takes a specified amount of the packet
+and copies it to the IPFW kernel socket. The `call` action allows the current packet to be passed to a different
+named filter for further processing. The `next` action
+calls the next filter in the stack of filters installed at the
+current filter location. In addition, the BSD/OS IPFW
+system allows packets to be modified explicitly by the
+filter program, or as the consequence of calling another
+filter program. The classic “accept” and “reject” actions
+have been extended so they can also optionally log the
+packet to the kernel socket.
+
+5.7 Filter Pool
+
+In addition to the explicit filtering points in the kernel
+a pool of filter programs can be installed into the kernel, not associated with a particular filtering point. This
+allows common filter programs to be installed into the
+filter pool and then be referenced from any of the other
+filters installed in the running system. Currently only
+BPF based filters have the ability to call a filter from the
+pool. The filter called may delete the packet or return a
+value associated with the packet. Typically this value is
+boolean. The called filter might also be used to record
+some state that can later be accessed.
+Unlike BPF programs, it is possible to create an infinite loop of called filters. There is no loop detection
+in the filter software, which could be considered a flaw.
+Users of the IPFW system are obligated to understand
+the interactions between all their filter programs.
+
+5.8 Circuit Cache
+
+Although BPF filters themselves are stateless, by using custom coded filters, such as the circuit cache, the
+filters can access saved state about a connection. The
+circuit cache provides the system with two features. The
+first is the ability of a BPF program to request the circuit
+described by a packet be added to the cache. A circuit is
+defined as the combination of the source and destination
+addresses, along with the source and destination ports
+for the upper level protocol, if relevant. The second is
+the ability to pass a packet to the cache for it to determine
+if that session has been seen before. For example, TCP
+packets can be divided into “Initial `SYN`” packets and
+“Established” packets. Initial SYN packets are subject
+to potentially complicated rules to determine if the session should be allowed. If the packet is to be accepted,
+it is passed to the circuit cache asking for an entry to
+be added for its circuit. Any Established packet is simply passed to the circuit cache for query. If the packet
+does not match an existing session, it is rejected. The
+circuit cache understands the TCP protocol and when
+caching TCP circuits it can optionally monitor FIN and
+`RST` packets and automatically terminate a circuit when
+the TCP session is shut down. Circuits may also automatically be timed out to reclaim kernel resources after
+a configuration period of inactivity.
+
+7 BPF Language Overview
+
+The most used and most flexible filter type in IPFW is the BPF filter. As mentioned earlier, this type of filter uses the BPF pseudo-machine. The BPF pseudo-machine has been enhanced for use with IPFW. Only one totally new BPF instruction was added for IPv4 packet processing. A new memory type was added, as well asthe ability to modify the packet being processed. IPv6 enhancements have been added and are discussed at the end of this section.
+
+The new BPF instruction, `CCC`, enables the calling of a filter on the “call filter chain.” While it might seem that the acronym stands for “Call Call Chain,” it was actually derived from “Call Circuit Cache.” The circuit cache was the reason for the creation of the call chain. The CCC instruction returns the result of the call in the `A` register.
+
+The new memory type is called ROM and is an additional memory area to the original BPF memory spaces.
+The original memory spaces included the packet contents as well as the scratch memory arena. While the first
+implementation did in fact store read only information, the term ROM is now a misnomer as the ROM locations can be modified by the filter. This space, called “prom” in the source code, is used to pass ancillary information in and out of the BPF filter.
+
+While the `bpf_filter()` function does not have any innate knowledge of the meaning of these memory locations, IPFW assigns meanings to several locations:
+0 IPFWM_AUX An auxiliary return value (for errors)
+1 IPFWM_SRCIF The index of the source interface (if known)
+2 IPFWM_DSTIF The index of the destination interface (if known)
+3 IPFWM_SRCRT The index of the interface for return packets
+4 IPFWM_MFLAGS The mbuf flags
+5 IPFWM_EXTRA Bytes of wrapper that preceeded this packet
+6 IPFWM_POINT What filter point was used
+7 IPFWM_DSTADDR New address to use for routing to destination
+The BPF filter is intelligent about setting these values. As some of these values, such as `IPFWM_SRCRT`,
+can be expensive to calculate, the filter is examined when passed into the kernel. A bitmap is built of all ROM locations referenced by the program and only those locations are initialized.
+
+In order to support the ROM memory space, the calling convention of the `bpf_filter()` function was changed to pass three additional parameters:
+
+int32_t *prom; /* ptr to ROM memory */
+int promlen; /* count of valid bytes */
+/* in the memory space */
+int modify; /* boolean to indicate */
+/* whether packet */
+/* can be modified */
+/* by bpf_filter() */
+
+All existing calls to `bpf_filter()` were modified to pass NULL, 0, 0 for these three values.
+
+IPFW has been adapted for use with IPv6. This work was implemented with the NRL version of IPv6. More recent releases of BSD/OS use the KAME IPv6 implementation. The changes to support IPFW in the KAME IPv6 stack have not yet been written.
+
+In order to support IPv6, several other new enhancements were made to the BPF pseudo-machine. Triple
+length instructions were added. A “classic” BPF instruction is normally 64 bits in size: 16 bits of opcode, two
+8 bit jump fields, and a 32 bit immediate field. A triple
+length instruction has 128 bits of additional immediate
+data (the length of an IPv6 address). A new register,
+`A128`, was also added. The load, store, and jump instructions now have 128 bit versions. The scratch memory locations have been expanded to 128 bits, though
+traditional programs only use the lower 32 bits of each
+location. An instruction to zero out a scratch memory
+location (`ZMEM`) was added. Because BPF was not extended to handle 128 bit arithmetic, a new jump instruction was created that allowed for the comparison of the
+`A` register to a network address, subject to a netmask.
+The netmask must be specified as a CIDR style netmask,
+specifically a count of the number of significant bits in
+the netmask.
+
+ROM locations only have 32 bit values and it is in the
+ROM that a new destination routing address is passed.
+Currently it is not possible to use the next-hop routing
+capability with IPv6.
+>>
+
+
+для других областей памяти вводим номер сгемента - и помещаем его в jf, "from"; BPF_LEN становится параметром лимита каждого сегмента
+вообще, можно попробовать обойтись без бита Little Endian в BPF_LD/BPF_ST - ведь он актуален только для packet, т.е. нулевого сегмента; в других сегментах зато нужен atomic, правда набор функций разный на фре и линуксе
+но вообще BPF_ATOMIC в eBPF есть только в BPF_STX, а там меньше модов - нет работы с пакетом...
+а нужно ли тратить на BPF_MEMSX	и movsx? может это можно сделать отдельной операцией в ALU?
+
+
+BPF_LOOP_NEXT и BPF_LOOP_LAST - как джампы, off указывают вперёд на закрывающую скобку
+может совместить их? типа в last будет k=0, иначе величина инкремента
+BPF_LOOP_DO - инициализация, off указывает вперёд на закрывающую скобку
+BPF_LOOP_END - единственный собственно (условный) джамп назад, off указывает на открывающую скобку
+
+так как BPF_RVAL(code)  ((code) & 0x18) то мало бит, логично в BPF_RET разместить только BPF_LOOP_END и другие типа BPF_CALL - как те, кто могут возвращаться *назад*
+а остальные BPF_LOOP_* в классе BPF_JMP
+
+эдак на I,J,K,L не хватит бит...
+хотя там же еще старший байт, разве что его для регистра инициализации
+===
+19.07.24
+назвать для общей длины _OPEN и _BACK и _SKIP мож?
+засунуть BPF128 в BPF_MISC?
+===
+20.07.24
+Поскольку в JIT на популярных RISC всё равно регистров не хватит, то фиг
+с ним, пусть будет например платформенный #define скажем на 4 регистра из
+каждого типа, а остальные держит в памяти (и сохраняет туда при вызовах
+внешних функций чтоб выглядеть как и интерпретатор VM) - но сейчас время
+ускорителей вместо CPU общего назначения, поэтому можно проектировать это как
+ассемблер некоей машины, которая будет сделана в железе. Например, offload
+в сетевую карту - еще и поэтому общие указатели в ядре не годятся (как
+в линуксе), ибо у железки могут отмаплены только определенные буферы хоста.
+
+с сего момента редактируемый черновик спеки, без отдельных записей дат по дням
+
+Subject: BPF64: proposal of platform-independent hardware-friendly eBPF alternative
+
+Hello!
+
+I've recently had some experience with Linux's ePBF in it's XDP, and this left
+quite negative impression. I was following via https://github.com/xdp-project/xdp-tutorial
+and after 3rd lesson was trying to create a simple program for searching TCP
+timestamp option and incrementing it by one. As you know, eBPF tool stack
+consists of at least clang and eBPF verifier in the kernel, and after two dozen
+tries eBPF verifier still didn't accept my code. I was digging into verifier
+sources, and the abysses opened in front of me! Carefully and boringly going
+via disassembler and verifier output, I've found that clang optimizer ignores
+just checked register - patching one byte in assembler sources (and target .o)
+did help. I've filed https://github.com/iovisor/bcc/issues/5062 with details
+if one curious.
+
+So, looking at eBPF ecosystem, I must say it's a Frankenstein. Sewn from good,
+sometimes brilliant parts, it's a monster in outcome. Verifier is in it's own
+right, compiler/optimizer is in it's own right... But at the end you even
+don't have a high-level programming language! You must write in C, relatively
+low-level C, and restricted subset of C. This requires very skilled
+professionals - it's far from something not even user-friendly, but at least
+sysadmin-friendly, like `ipfw` or `iptables` firewall rules.
+
+Thus I looked at the foundation of eBPF architecture, with which presuppositions
+in mind it was created with. In fact, it tries to be just usual programming
+after checks - that is, with all that pointers. It's too x86-centric and
+Linux-centric - number of registers was added just ten. So if you look at the
+GitHub ticket above, when I tried to add debug to program - you know, just
+specific `printf()`s - it failed verifier checks again because compiler now
+had to move some variables between registers and memory, as there is limit on
+just 5 arguments to call due to limit of 5 registers! And verifier, despite
+being more than 20,000 lines of code, still was not smart enough to track info
+between registers and stack.
+
+So, if we'd started from beginning, what should we do? Remember classic BPF:
+it has very simple validator due to it's Virtual Machine design - only forward
+jumps, checks for packet boundaries at runtime, etc. You'd say eBPF tries for
+performance if verifier's checks were passed? But in practice you have to toss
+in as much packet boundary checks as near to actual access as possible, or
+verifier may "forget" it, because of compiler optimizer. So this is not of
+much difference for checking if access is after packet in classic BPF - the
+same CMP/JUMP in JIT if buffer is linear, and if your OS has put packet in
+several buffers, like *BSD or DPDK `mbuf`'s, the runtime check overhead is
+negligible in comparison.
+
+Ensuring kernel stability? Just don't allow arbitrary pointers, like original BPF.
+Guaranteed termination time? It's possible if you place some restrictions. For
+example, don't allow backward jumps but allow function calls - in case of
+stack overflow, terminate program. Really need backward jumps? Let's analyze
+for what purpose. You'll find these are needed for loops on packet contents.
+Solve it but supporting loops in "hardware"-controlled loops, which can's be
+infinite.
+
+Finally, platforms. It's beginning of sunset of x86 era now - RISC is coming.
+ARM is now not only on mobiles, but on desktops and servers. Moreover, it's
+era of specialized hardware accelerators - e.g. GPU, neural processors. Even
+general purpose ARM64 has 31 register, and specialized hardware can
+implement much more. Then, don't tie to Linux kernel - BPF helpers are very
+rigid interface, from ancient era, like syscalls.
+
+So, let's continue *Berkeley* Packet Filter with Berkeley RISC design - having
+register window idea, updated by SPARC and then by Itanium (to not waste
+registers). Take NetBSD's coprocessor functions which set is passed with
+a context, instead of hardcoded enums of functions - for example, BPF maps is
+not something universal, both NetBSD and FreeBSD have their own tables in
+firewall.
+
+TODO
+
+
+> First, a BPF program using bpf_trace_printk() has to have a GPL-compatible license.
+> Another hard limitation is that bpf_trace_printk() can accept only up to 3 input arguments (in addition to fmt and fmt_size). This is quite often pretty limiting and you might need to use multiple bpf_trace_printk() invocations to log all the data. This limitation stems from the BPF helpers ability to accept only up to 5 input arguments in total.
+> Previously, bpf_trace_printk() allowed the use of only one string (%s) argument, which was quite limiting. Linux 5.13 release lifts this restriction and allows multiple string arguments, as long as total formatted output doesn't exceed 512 bytes. Another annoying restriction was the lack of support for width specifiers, like %10d or %-20s. This restriction is gone now as well
+
+> enum bpf_func_id___x { BPF_FUNC_snprintf___x = 42 /* avoid zero */ };
+
+Ancient syscall-like way of global constant, instead of context
+
+
+> Helper function bpf_snprintf
+> Outputs a string into the str buffer of size str_size based on a format string stored in a read-only map pointed by fmt.
+>
+> Each format specifier in fmt corresponds to one u64 element in the data array. For strings and pointers where pointees are accessed, only the pointer values are stored in the data array. The data_len is the size of data in bytes - must be a multiple of 8.
+>
+> Formats %s and %p{i,I}{4,6} require to read kernel memory. Reading kernel memory may fail due to either invalid address or valid address but requiring a major memory fault. If reading kernel memory fails, the string for %s will be an empty string, and the ip address for %p{i,I}{4,6} will be 0. Not returning error to bpf program is consistent with what bpf_trace_printk() does for now.
+>
+> Returns
+>
+> The strictly positive length of the formatted string, including the trailing zero character. If the return value is greater than str_size, str contains a truncated string, guaranteed to be zero-terminated except when str_size is 0.
+>
+> Or -EBUSY if the per-CPU memory copy buffer is busy.
+>
+> static long (* const bpf_snprintf)(char *str, __u32 str_size, const char *fmt, __u64 *data, __u32 data_len) = (void *) 165;
+
+
+
+
+1. in BPF_LD and BPF_LDX
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | Register number N |MSX|    BPF_EXTMODE    |PF_SIZE| BPF_CLASS |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |       jt = atomic op/reg      |        jf = from segment      |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |                                                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                    2                   1
+
+BPF_EXTMODE:
+
+#define	BPF_IMM 	0x000	// 0 0 0 0 0 regs[N] <- k
+#define	BPF_ABS		0x020	// 0 0 0 0 1 regs[N[ <- P[k:BPF_SIZE]
+#define	BPF_IND		0x040	// 0 0 0 1 0 regs[N] <- P[X+k:BPF_SIZE]
+#define	BPF_MEM		0x060	// 0 0 0 1 1 regs[N] <- M[k]
+#define	BPF_LEN		0x080	// 0 0 1 0 0 regs[N] <- pkt.len
+#define	BPF_MSH		0x0a0	// 0 0 1 0 1 X <- 4*(P[k:1]&0xf)
+// BPF_IND+BPF_MSH	0x0e0	// 0 0 1 1 1 X <- 4*(P[X+k:1]&0xf) # when DLT unknown
+#define	BPF_RODATA	0x0c0	// 0 0 1 1 0 regs[N] <- C[8*pc+imm:BPF_SIZE]
+/* reserved		0x100	   0 1 0 0 0 */
+#define	BPF_ABS_SEG	0x120	// 0 1 0 0 1 regs[N[ <- seg[jf]->P[k:BPF_SIZE]
+#define	BPF_IND_SEG_X	0x140	// 0 1 0 1 0 regs[N[ <- seg[jf]->P[X+k:BPF_SIZE]
+#define	BPF_IND_SEG_Y	0x160	// 0 1 0 1 1 regs[N[ <- seg[jf]->P[Y+k:BPF_SIZE]
+#define	BPF_LEN_SEG	0x180	// 0 1 1 0 0 regs[N] <- seg[jf].len
+#define	BPF_ABS_PKT_LE	0x1a0	// 0 1 1 0 1 regs[N[ <- from_leSIZE(P[k:BPF_SIZE])
+#define	BPF_IND_PKT_LE	0x1b0	// 0 1 1 1 0 regs[N[ <- from_leSIZE(P[X+k:BPF_SIZE])
+/* reserved		0x1e0	   0 1 1 1 1 */
+/* reserved		0x200	   1 0 0 0 0 */
+#define	BPF_ABS_CPU	0x220	// 1 0 0 0 1 regs[N[ <- perCPU(seg[jf], k, BPF_SIZE)
+#define	BPF_IND_CPU_X	0x240	// 1 0 0 1 0 regs[N[ <- perCPU(seg[jf], X+k, BPF_SIZE)
+#define	BPF_IND_CPU_X1	0x260	// 1 0 0 1 1 regs[N[ <- perCPU(seg[jf], X1+k, BPF_SIZE)
+#define	BPF_ATOMIC	0x6e0	// 1 1 x x x mask for atomic operations
+
+from_leSIZE() loads specified BPF_SIZE bytes which are little-endian. For
+example, on little-endian platform loading BPF_H requires `ntohs()` but
+`from_leH()` is no-op, on big-endian platform ordinary load do not require
+conversion (it's already network byte order), but *_PKT_LE modes will require.
+These modes defined only for packet access because other memory segment are
+expected to be in native machine byte order. For rare cases when this is not
+true, there is BPF_ENDIAN instruction in BPF_ALU class.
+
+BPF_RODATA is for generic literal, addressing mode around `pc` in code
+segment, see BPF_DATA_LITERAL instruction
+
+22.07.24 need a way to pass not just words but *address* to cop-functions, e.g.
+address of literal to `printf()` or structure addresses in shared segment for
+complex table/map lookup functions
+- похоже нет, нельзя, это принципиально дыра в безопасности - для cop-функций
+  хватит индекса в сегменте
+- но блин, а когда надо, для того же `printf()` ?..
+
+TBD заюзать регистр 26 как kernptr, запретив на нём ALU ? но чем это
+кардинально отличается от вычисления адреса из сегмента в самой cop-функции?..
+а в не-ядре (железке) в таком регистре один фиг будет записан BPF_EMODE||jf||k
+- имеет смысл для литерала из RODATA, если залочить регистр после записи
+  (отлочивается в cop-функции) - ведь непосредственно в вызове можно только
+  регистры передавать, а для RODATA там в каждой инструкции своё смещение
+
+TBD может вообще режимы переделать? сунуть их все в jf например, а то 256
+сегментов многовато, да и не ортогональный какой-то enum получается...
+
+это же еще возможен NULL на сегмент / загрузка сегмента в результате функции,
+типа lookup_dyn_rule() какой-нибудь
+
+продумывать механизм сигналов/исключений? типа сегмент NULL, хэндлер инсталлит
+сгемент, повторяем операцию?
+
+23.07.24 23:59 а как системы с managed-памятью? вот в перле ссылка - не адрес
+а может, перловый скаляры передавать в kernel cop-функции? типа вот инструкция
+сказала newSVpvn() "на две трети этого литерала", и теперь в cop-функции можно
+передавать номер скаляра и индекс в нём; скаляр содержит тип, так что не
+будет создан новый при передаче тех же параметров, а вернут существующий, etc.
+
+the answer lies in the managed-memory languages
+
+получатся скаляры как fd-дескрипторы - часть environment
+
+тогда может и сегменты переделать на скаляры? вопрос со статикой-динамикой,
+они же в jf, а регистров - мало, и аллокации памяти во время работы тормозно
+
+не, ну можно ввести разделение по диапазону - вот статические, вот (регистр)
+динамические, и для статических затребовать в инструкции конкретный номер
+
+если можно новый скаляр создавать из другого, тогда между ними нужно вести
+бухгалтетрию
+- хотя это проблемы ядра/машины, а не программы
+
+можно в каждом скаляре хранить его OFFSET как сохранённое значение для X и
+загружать в X с помощью BPF_MSH
+- тогда его туда как-то и сохранять надо
+
+25.07.24
+по аналогии с селекторами 386, младшие 2 бита jf - тип операции,
+обычный/atomic/perCPU, остальное - номер сегмента; если номер на 0xf то 2 бита
+на номер сегментного регистра
+
+вообще нужно-то что... BPF_ABS, BPF_LEN и BPF_IND расширить сегментом,
+BPF_IND расширить как можно больше индексных регистров, BPF_ABS и BPF_IND
+расширить PKT_LE для пакета, но не для сегмента, и где-то еще прилепить RODATA
+
+		classic		PKT_LE		segment		X regs
+BPF_ABS:	1		1		1		0
+BPF_IND:	1		1		1		* N
+BPF_LEN:	1		0		1		MSH?
+
+BPF_RODATA можно вынести как BPF_IMM в спец. сегменте 0, тогда его код
+0xc0 = BPF_IND+BPF_LEN можно сделать как P[Y+k:BPF_SIZE], а в старшие 2 бита
+уже выбор: 0 - обычный, 1 - PKT_LE, 2 - сегмент в jf
+- не, под PKT_LE его, модификатор - точнее BPF_L
+
+кстати, BPF_MSH = BPF_ABS+BPF_LEN, есть логика - тогда надо BPF_IND+BPF_LEN
+для X <- 4*(P[X+k:1]&0xf)
+BPF_MSH разрешен же только в LDX для самого X <- т.е. можно реюзнуть в LD ?
+а вообще всего два индексных регистра хватит, надо оставить для расширения
+
+в LDX всего 4 режима, BPF_IND среди них нет, значит таки BPF_IND+BPF_MSH
+а в LD реюзать BPF_MSH нельзя - вдруг ошибка программиста? в валидатор можно сунуть
+значит таки 0xc0 = BPF_IND+BPF_LEN идёт как P[Y+k:BPF_SIZE]
+
+variant 2:
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | Register number N |SIG|    BPF_EXTMODE    |PF_SIZE| BPF_CLASS |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |  jt = atomic op   |WID|A/B/C/D|    jf = from segment  | Type  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |                                                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                    2                   1
+
+BPF_EXTMODE:
+
+#define	BPF_IMM 	0x000	// 0 0 0 0 0 regs[N] <- k
+#define	BPF_ABS		0x020	// 0 0 0 0 1 regs[N[ <- P[k:BPF_SIZE]
+#define	BPF_IND		0x040	// 0 0 0 1 0 regs[N] <- P[X+k:BPF_SIZE]
+#define	BPF_MEM		0x060	// 0 0 0 1 1 regs[N] <- M[k]
+#define	BPF_LEN		0x080	// 0 0 1 0 0 regs[N] <- pkt.len
+#define	BPF_MSH		0x0a0	// 0 0 1 0 1 X <- 4*(P[k:1]&0xf)
+#define	BPF_IND_Y	0x0c0	// 0 0 1 1 0 regs[N] <- P[X+k:BPF_SIZE]
+// BPF_IND+BPF_MSH	0x0e0	// 0 0 1 1 1 X <- 4*(P[X+k:1]&0xf) # when DLT unknown
+
+#define BPF_SIGN	0x400
+
+#define BPF_L		0x100
+#define BPF_SEG		0x200
+
+#define	BPF_RODATA (BPF_L|BPF_IMM) // 0 1 0 0 0 regs[N] <- C[8*pc+imm:BPF_SIZE]
+
+#define BPF_PERCPU	0x01
+#define	BPF_ATOMIC	0x02
+/* type 03 reserved */
+
+BPF_SEG|BPF_MEM may be used in future for additional segment attributes
+
+for atomic operations requiring 3 arguments, only registers A or B or C or
+D are allowed as third operand, and returned (boolean) value from such
+functions is always placed in A
+
+2. in BPF_ST
+
+Here existing implementations check just BPF_ST or BPF_STX, that is, BPF_IMM
+is treated like BPF_MEM. However, new code need not be defined, because there
+is no point to store in 'k' of instruction - self-modifying code can't be
+verified.
+
+TBD
+
+4. in BPF_ALU
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | Register number N |MSX|WID| Y |     BPF_OP    |SRC| BPF_ALU=4 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |      jt - "to" register       |     jf - "from" register      |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |                                                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+WID=0 - 32-bit registers, WID=1 - 64-bit registers
+
+#define	BPF_ADD		0x00
+#define	BPF_SUB		0x10
+#define	BPF_MUL		0x20
+#define	BPF_DIV		0x30
+#define	BPF_OR		0x40
+#define	BPF_AND		0x50
+#define	BPF_LSH		0x60
+#define	BPF_RSH		0x70
+#define	BPF_NEG		0x80
+#define	BPF_MOD		0x90
+#define	BPF_XOR		0xa0
+/*			0xb0	reserved */
+#define	BPF_ARSH	0xc0	/* sign extending arithmetic shift right */
+#define	BPF_ENDIAN	0xd0	/* byteswap/endianness change */
+#define	BPF_SDIV	0xe0	/* signed division */
+#define	BPF_SMOD	0xf0	/* signed %= */
+
+TBD two new opcodes sdiv/smod or MSX bit? BPF_NOT is missing, and if put it to
+0xb0 then no reserved left if sdiv/smod used
+TBD also, are we guaranteed that jt and jf will always be 0 in cBPF ? if yes,
+then regs[jt] and regs[jf] could be used, if no, then need J bit for using them!
+BPF_STMT macro sets them to 0, tcpdump also emits 0, but what if
+non-conformant compilers exist?..
+
+or do 'jt' as 'third' ? e.g. X, Y, or CIDR with counts of 1's and 0's in k
+
+`Z(k)` means "zero-ones pseudo-register" described as follows - take low byte
+of `k` and interpret it as:
+
+      MSB      6       5       4       3       2       1       0
+    +-------+-------+-------+-------+-------+-------+-------+-------+
+    |Starts |Number of 'Starts' bit, then it's inversion bits to 128|
+    +-------+-------+-------+-------+-------+-------+-------+-------+
+
+That is, it is used not only as "zero" register, but for CIDR operations:
+netmask and hostmask. For example, /48 netmask will be 0xb0 and mean 48 1's
+and then 80 zeroes; hostmask for /48 will be 0x30 - starts with 0, so 48
+zeroes and 80 ones.
+
+Note that filling is from MSB to LSB, but application for smaller register
+widths is from right - e.g. 0xf0 is /112 for IPv6, mask 0xffff_ffff_ffff_0000
+for 64-bit registers, and 0xffff0000 i.e. /16 for IPv4 / 32-bit registers.
+
+`R(k)` is `Z(k)` with part of values taken to be register identifier, based on
+fact that hostmasks for very large IPv6 subnets are rarely used - however, if
+provided `k` has more than 8 bits width (it's really `k` and not e.g. `jt`/`jf`),
+then such values are still available - e.g. `R(0x106)` is equal to `Z(6)`.
+
+The beginning of value space is number of register and/or it's width. In some
+classes only 5 bits are available, for that 0-31 are "generic", sometimes with
+separate width bit, or implied by context. If not, and more bits are
+available, width from table below is used.
+
+   Num | Name | Bits | Type            | Visible | Comments
+   ====+======+======+=================+=========+=======================
+    0  |   A  |  32  | General-purpose | Global  | Accumulator
+    1  |   B  |  32  | General-purpose | Global  | 
+    2  |   C  |  32  | General-purpose | Global  | 
+    3  |   D  |  32  | General-purpose | Global  | 
+    4  |   E  |  32  | General-purpose | Global  | 
+    5  |   F  |  32  | General-purpose | Global  | 
+    6  |   G  |  32  | General-purpose | Global  | 
+    7  |   H  |  32  | General-purpose | Global  | 
+    8  |   W0 |  32  | Rotated/renamed | Local   | usually 1st arg to func
+    9  |   W1 |  32  | Rotated/renamed | Local   | 2nd arg to func
+    10 |   W2 |  32  | Rotated/renamed | Local   | and so on
+    11 |   W3 |  32  | Rotated/renamed | Local   | 
+    12 |   W4 |  32  | Rotated/renamed | Local   | some of them is first
+    13 |   W5 |  32  | Rotated/renamed | Local   | local variable
+    14 |   W6 |  32  | Rotated/renamed | Local   | 
+    15 |   W7 |  32  | Rotated/renamed | Local   | some for input/output
+    16 |   W8 |  32  | Rotated/renamed | Local   | with next callee
+    17 |   W9 |  32  | Rotated/renamed | Local   | 
+    18 |  W10 |  32  | Rotated/renamed | Local   | 
+    19 |  W11 |  32  | Rotated/renamed | Local   | 
+    20 |  W12 |  32  | Rotated/renamed | Local   | 
+    21 |  W13 |  32  | Rotated/renamed | Local   | 
+    22 |  W14 |  32  | Rotated/renamed | Local   | 
+    23 |  W15 |  32  | Rotated/renamed | Local   | 
+    24 |  W16 |  32  | Rotated/renamed | Local   | 
+    25 |  W17 |  32  | Rotated/renamed | Local   | 
+    26 | KERN | N/A  | Special: k-addr | Opaque  | W.O.R.K.
+    27 |Reserved for future use as flags & trap jump condition
+    28 |   I  |  32  | Special: loop 0 | Local   | read-only, most outer loop
+    29 |   J  |  32  | Special: loop 1 | Local   | read-only 
+    30 |   K  |  32  | Special: loop 2 | Local   | read-only 
+    31 |   L  |  32  | Special: loop 3 | Local   | read-only, most inner loop 
+   ----+------+------+-----------------+---------+-----------------------
+    32 |  Ad  |  64  | General-purpose | Global  | A is low 32 bits of Ad
+    33 |  Bd  |  64  | General-purpose | Global  | B is low 32 bits of Bd
+    34 |  Cd  |  64  | General-purpose | Global  | and so on
+    35 |  Dd  |  64  | General-purpose | Global  | 
+    36 |  Ed  |  64  | General-purpose | Global  | 
+    37 |  Fd  |  64  | General-purpose | Global  | 
+    38 |  Gd  |  64  | General-purpose | Global  | 
+    39 |  Hd  |  64  | General-purpose | Global  | 
+    40 |  R0  |  64  | Rotated/renamed | Local   | usually 1st arg to func
+    41 |  R1  |  64  | Rotated/renamed | Local   | 2nd arg to func
+    42 |  R2  |  64  | Rotated/renamed | Local   | and so on
+    43 |  R3  |  64  | Rotated/renamed | Local   | 
+    44 |  R4  |  64  | Rotated/renamed | Local   | some of them is first
+    45 |  R5  |  64  | Rotated/renamed | Local   | local variable
+    46 |  R6  |  64  | Rotated/renamed | Local   | 
+    47 |  R7  |  64  | Rotated/renamed | Local   | some for input/output
+    48 |  R8  |  64  | Rotated/renamed | Local   | with next callee
+    49 |  R9  |  64  | Rotated/renamed | Local   | 
+    50 |  R10 |  64  | Rotated/renamed | Local   | 
+    51 |  R11 |  64  | Rotated/renamed | Local   | 
+    52 |  R12 |  64  | Rotated/renamed | Local   | 
+    53 |  R13 |  64  | Rotated/renamed | Local   | 
+    54 |  R14 |  64  | Rotated/renamed | Local   | 
+    55 |  R15 |  64  | Rotated/renamed | Local   | 
+    56 |  R16 |  64  | Rotated/renamed | Local   | 
+    57 |  R17 |  64  | Rotated/renamed | Local   | 
+    58 |   X  |  32  | Special: index  | Global  | 
+    59 |   Y  |  32  | Special: index  | Global  | 
+    60 |   Z0 | 128  | Special: IPv6   | Global  | no ALU except AND/OR
+    61 |   Z1 | 128  | Special: IPv6   | Global  | no ALU except AND/OR
+    62 |   Z2 | 128  | Special: IPv6   | Global  | no ALU except AND/OR
+    63 |   Z3 | 128  | Special: IPv6   | Global  | no ALU except AND/OR
+
+TBD more index registers? shadow / bank switching registers? scalar selector register?
+- no bank-switching, there's BPF_MEM for it
+
+TBD
+
+5. in BPF_JMP
+
+This class retains forward jumps only, so includes only two of three loop opcodes.
+
+				// SRC = BPF_K or BPF_X
+#define	BPF_JA		0x00	// pc += k
+#define	BPF_JEQ		0x10	// pc += (A == SRC) ? jt : jf
+#define	BPF_JGT		0x20	// pc += (A > SRC) ? jt : jf
+#define	BPF_JGE		0x30	// pc += (A >= SRC) ? jt : jf
+#define	BPF_JSET	0x40	// pc += (A & SRC) ? jt : jf
+#define BPF_JNE		0x50	/* jump != */
+#define BPF_JSGT	0x60	/* SGT is signed '>', GT in x86 */
+#define BPF_JSGE	0x70	/* SGE is signed '>=', GE in x86 */
+#define	BPF_LOOP_NEXT	0x80	/* loop 'continue' / 'break' */
+#define	BPF_LOOP_OPEN	0x90	/* loop start' */
+#define BPF_JLT		0xa0	/* LT is unsigned, '<' */
+#define BPF_JLE		0xb0	/* LE is unsigned, '<=' */
+#define BPF_JSLT	0xc0	/* SLT is signed, '<' */
+#define BPF_JSLE	0xd0	/* SLE is signed, '<=' */
+#define BPF_JEXT	0xe0	/* extended operation in BPF_JMPMODE */
+/*			0xf0	reserved */
+
+The codes 0x50-0x70 and 0xa0-0xd0 are taken from eBPF with the same meaning
+and reason - classic BPF always had `jt` and `jf` fields so only half of
+instructions were needed - in case of needing '<=' instead of '>' one could
+always just swap true and false branch destinations. By extending `jt` to
+`off16` and `jf` always 0, this is no longer possible.
+
+ну тут всё понятно, интереснее расширения / зе луп
+
+Extended format for all except loops:
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | Register number N |BPF_JMPMODE|    BPF_OP     |SRC| BPF_JMP=5 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |               jt              |               jf              |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |                                                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+When BPF_JMPMODE is zero, opcodes behave almost as in cBPF - 32-bit registers
+and unsigned `jt`, `jf` are used, except that unsigned `k` in unsigned opcodes
+but signed `imm` in signed variants, and non-A general-purpose register,
+if it is non-zero.
+
+Otherwise, BPF_SRC bit is not used directly but as high bit together with
+BPF_JMPMODE forming nibble of mode with meanings:
+
+   SRC | MODE  | Hex | Meaning:
+   ====+=======+=====+=======================================================
+    0  | 0 0 0 |  0  | unusable - classic BPF
+   ----+-------+------+------------------------------------------------------
+    0  | 0 0 1 |  1  | regs[N] OP k
+    0  | 0 1 0 |  2  | regs[N] OP R(k)
+    0  | 0 1 1 |  3  | W=1 k
+    0  | 1 0 0 |  4  | W=1 R(k)
+    0  | 1 0 1 |  5  | 
+    0  | 1 1 0 |  6  | 
+    0  | 1 1 1 |  7  | 
+   ----+-------+-----+------------------------------------------------------
+    1  | 0 0 0 |  8  | unusable - classic BPF
+   ----+-------+-----+------------------------------------------------------
+    1  | 0 0 1 |  9  | 
+    1  | 0 1 0 |  a  | AAAA=1 k
+    1  | 0 1 1 |  b  | AAAA=1 Z(k)
+    1  | 1 0 0 |  c  | AAAA=1 R(k)
+    1  | 1 0 1 |  d  | 
+    1  | 1 1 0 |  e  | 
+    1  | 1 1 1 |  f  | 
+
+=== variant 2 (24.07.24)
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |          R(N)         |OFF|Rk |    BPF_OP     |SRC| BPF_JMP=5 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |               jt              |               jf              |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |                                                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+if off=1, then 16 bit unsigned `off` field is used instead of `jt` and `jf` is
+implicitly zero
+
+if SRC=BPF_X then it is X if Rk=0, otherwise R320(k) is used
+validator must check for permitted combinations e.g. different width 32/64/128
+
+TBD Rk is not enough for extended op - ranges, table...
+
+=== /variant 2
+
+
+TBD
+
+BPF_LOOP_OPEN:
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |     Reserved      |SUB|LoopVar| BPF_OP = 0x90 |SRC| BPF_JMP=5 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |           MUST point to corresponding BPF_LOOP_BACK           |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |     Start value: imm (signed) if BPF_K or R26(k) if BPF_X     |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+BPF_LOOP_NEXT:
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |     Reserved      |SUB|LoopVar| BPF_OP = 0x80 |SRC| BPF_JMP=5 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |           MUST point to corresponding BPF_LOOP_BACK           |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |      abs(increment_value): k if BPF_K or R26(k) if BPF_X      |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+if BPF_LOOP_LAST (0), then loop is terminated early - "break"
+
+validator MUST strictly check that there is no NEXT I inside loop on j, k, l
+and no NEXT J or NEXT I in loops on k, l, etc. - that is, that nesting is
+proper
+
+TBD
+
+
+6. in BPF_RET
+
+Opcodes in this class are altering control flow graph program in a
+possibly non-forward way - e.g. BPF_JMP allows only forward jumps, but BPF_RET
+allows to jump backwards or even terminate current program.
+
+The first is BPF_EXIT, the only instruction in this class in classic BPF.
+It returns from current function or entire program, yielding return value in
+register A for caller, if it was a procedure. Here for BPF_RVAL allowed values
+are BPF_A, BPF_K and BPF_X. If more parameters were needed by calling
+procedure, they are passed in input section of rotated registers.
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |                               |BPF_EXIT=0 | _RVAL | BPF_RET=6 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |                                                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+If a return was to previous function in the stack, register window is
+automatically restored as it was in previous function.
+
+
+* BPF_CALL:
+
+Call a function. Backward address is allowed. Return address is placed in
+shadow (back) stack. From the register window point of view, call is two-part
+process - first, calling procedure advances window, hiding it's own input and
+local registers from callee. Then, simple callee may choose to not do anything
+at all, but if callee plans to call another functions, the rest of window must
+be set up with BPF_PROLOG instruction.
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |               |RegWindow shift|BPF_CALL=1 | _RVAL | BPF_RET=6 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |                imm (signed): pc += imm                        |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+* BPF_PROLOG:
+
+  Usually the first instruction of called function. Advances register window,
+  declaring how many local and output registers will be used.
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | # input regs  | # to max regs |     2     | _RVAL | BPF_RET=6 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |                                                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+  Caller reserves it's output registers number to maximum of any called
+  function can accept. Thus every called function must declare how many
+  it has input registers actuall - and reserves rest of space for both local
+  and it's own output registers. Then, when it's time to do it's own call,
+  it knows how many local registers it has and advances window by this number
+  in BPF_CALL.
+
+  As it can be seen from field sizes, both `(input+local) <= 15` and
+  `(local+output)` <= 15` (that's not a big restriction given small number of
+  available rotating registers). Limiting output registers is two-purpose: to
+  not overdo zero initialization of those registers on call and to check for
+  errors - an exception will be thrown on access to register after declared.
+
+  Also note that this scheme allows caller to have different number of local
+  registers for different callees - e.g. if between child calls some local
+  registers became no longer needed temporaries, it can advance window for
+  lesser number, leaving more space for output parameters for next call.
+
+
+* BPF_LOOP_BACK:
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |  BPF_J*       |   |SUB|LoopVar|     3     | _RVAL | BPF_RET=6 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |           MUST point to corresponding BPF_LOOP_OPEN           |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |               Final LoopVar value: always constant            |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+If this instruction was reached by "natural" means, operates on LoopVar like
+BPF_LOOP_NEXT, otherwise it was jump here from BPF_LOOP_NEXT which did t his already.
+Then checks LoopVar by corresponding code from BPF_JMP class and if true,
+`off` is used for jump backwards to first instruction after corresponding
+BPF_LOOP_OPEN. If result of test was false, or instruction reached by jump
+from BPF_LOOP_LAST, the loop is terminated, marked internally as reset, and
+control is passed to next instruction after BPF_LOOP_BACK.
+
+
+
+struct bpf_backstack_frame {
+	uint32_t	ret_addr;
+	uint8_t		reg_shift;	/* base for input registers */
+	uint8_t		reg_input;	/* locals after reg_shift+this */
+	uint8_t		reg_local;	/* local+out: reg_shift+input */
+	uint8_t		loop_flags;	/* which loops active + direction */
+	int32_t		loop_I;		/* value for register I */
+	int32_t		loop_J;		/* value for register J */
+	int32_t		loop_K;		/* value for register K */
+	int32_t		loop_L;		/* value for register L */
+};
+
+#define BPF_MAX_MEMWORDS	128
+#define BPF_MAX_BACKSTACK	32
+#define BPF_MAX_REGWINDOW	264
+
+/* Entire "process" and "CPU" memory - fit on 4 Kb page */
+struct bpf_process_mem {
+	const bpf_ctx_t	*bc;		/* where we live in? */
+	struct bpf_insn *pc;		/* current program counter */
+	struct bpf_insn *kreg_pc;	/* pc when KERN register written */
+	uint16_t	ds, es;		/* segment selector registers */
+	uint32_t	X, Y;		/* index registers */
+	uint8_t		bsp;		/* backstack pointer */
+	uint8_t		kreg_flags;	/* KERN reg locked? */
+	uint8_t		__align[26];	/* to 64 bytes from beginning */
+	uint64_t	g_regs[8];	/* A..H (64 bytes) */
+	struct in6_addr Y[4];		/* 128-bit registers (64 bytes) */
+	struct bpf_backstack_frame backstack[BPF_MAX_BACKSTACK]; /* 768 bytes */
+	uint64_t	reg_window[BPF_MAX_REGWINDOW];	/* 2112 bytes */
+	uint64_t	mem[BPF_MAX_MEMWORDS];	/* 1024 bytes * */
+};
+
+
+* BPF_TAILCALL:
+
+#define BPF_TAILCALL 0x80
+
+  Like `execve()` - replaces current running BPF program with another one. The
+  stack is rewinded - current output registers become input registers at
+  offset 0, all loops are reset. All other registers are reset, except A.
+  The retained resources consist only of A and input (former output)
+  registers as "argv", current packet and memory segments and first
+  `jt` (default BPF_MEMWORDS) of scratch memory as "environment".
+  Everything other is cleared, just like if new program was loaded fresh.
+
+  The platform-dependent identificator of new program is in `k` or `X`. The
+  instruction does not return if load was successful, otherwise execution is
+  continued from next instruction with A set to error number (so that program
+  could e.g. deny or accept packet).
+
+TBD addressing mode for using `k` as pointer to string in RODATA, and string
+in segment - for dynamic dispatch
+
+
+25.07.24 04:30 Эльбрус использует расширение регистрового окна два раза - вызывающая
+скрывает свои локальные, вызываемая расширяет на свои локальные
+http://ftp.altlinux.org/pub/people/mike/elbrus/docs/elbrus_prog/html/chapter9.html#register-description
+- вот и решение проблемы нехватки битов на 3 группы сразу в прологе
+
+
+7. in BPF_MISC:
+
+Here as it was in classic BPF:
+
+#define	BPF_TAX		0x00
+/*			0x08	reserved */
+/*			0x10	reserved */
+/*			0x18	reserved */
+#define	BPF_COP		0x20	/* NetBSD "coprocessor" extensions */
+/*			0x28	reserved */
+/*			0x30	reserved */
+/*			0x38	reserved */
+#define	BPF_COPX	0x40/* 	NetBSD "coprocessor" extensions */
+/*				also used on BSD/OS */
+/*			0x48	reserved */
+/*			0x50	reserved */
+/*			0x58	reserved */
+/*			0x60	reserved */
+/*			0x68	reserved */
+/*			0x70	reserved */
+/*			0x78	reserved */
+#define	BPF_TXA		0x80
+/*			0x88	reserved */
+/*			0x90	reserved */
+/*			0x98	reserved */
+/*			0xa0	reserved */
+/*			0xa8	reserved */
+/*			0xb0	reserved */
+/*			0xb8	reserved */
+/*			0xc0	reserved; used on BSD/OS */
+/*			0xc8	reserved */
+/*			0xd0	reserved */
+/*			0xd8	reserved */
+/*			0xe0	reserved */
+/*			0xe8	reserved */
+/*			0xf0	reserved */
+/*			0xf8	reserved */
+
+BPF_TAX and BPF_TXA:
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |        R32        |X numspace | BPF_TAX / BPF_TXA | BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |                               | jf = register in number space |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |                                                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+Extended number spaces:
+
+0 - X register
+1 - Y register
+2 - 128-bit registers
+3 - segment selector registers
+4-7 reserved for future use
+
+This way, it is possible to add more registers in the future, e.g. 128-bit
+registers for IPv6 addresses - while only four of them will be available for
+direct use in ALU/JMP/LD commands, it will be possible to have more fast
+registers in hardware for storage than to reload from slower (host) memory.
+
+
+Extended length instructions:
+
+Codes greater than 0x80 are for instructions which [may] occupy more than one
+`bpf_insn`
+
+=== variant 1
+
+#define		BPF_LD128IMM	0x60	/* NEW */
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |                               | 1 |InstrOffset|MIF| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |                                                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+      InstrOffset - 0 for first, 1 for second, etc.
+      MIF - more instructions flag, like MF in IPv4
+
+So errorneous jump into middle of instruction will be detected by non-first
+offset, and invalid encoding of offset=0 and more=0 (header, but no next
+instruction) will be impossible - it is BPF_TXA.
+
+Two extended instructions are currently defined.
+
+* BPF_STRING_LITERAL:
+
+first instruction:
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |BPF_STR_LITERAL = 0|PrcntBitmap| 1 |     0     | 1 | BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |                                                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+
+
+
+* BPF_LD128IMM
+
+first instruction:
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | BPF_LD128IMM=0x60 |Res|Registr| 1 |     0     | 1 | BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |                  Highest 2 bytes of 128 bits                  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |                   Next 4 bytes of 128 bits                    |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+subsequent instructions:
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |   H_OFF   |   W_OFF   |Reservd| 1 |InstrOffset|MIF| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |                  Halfword at H_OFF's hextet                   |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |                    Word at W_OFF's hextet                     |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+single (non-extended) instruction: 
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |   H_OFF   |   W_OFF   |Registr| BPF_LD128IMM=0x60 | BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |                  Halfword at H_OFF's hextet                   |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |                    Word at W_OFF's hextet                     |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+A 16 bit or two octet quantity is sometimes also called a hextet.
+
+off position, k position, if both=7 then it is low 64 bits: e.g. MAC address 00-0C-29-0C-47-D5 is turned into a 64-bit EUI-64 by inserting FF-FE in the middle: 00-0C-29-FF-FE-0C-47-D5.[f]
+
+=== /variant 1
+
+
+для TLV - jump table типа switch/case? а зачем MF, если можно заставить валидатор чекать отсутствие джампов в эту область
+
+=== variant 2
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |  Opcode / reg / size  |   Remaining length    |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      /                                                               /
+      \                                                               \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+* BPF_DATA_LITERAL:
+
+  Opcode reminds BPF_LD (0) and is destination for BPF_RODATA access mode
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   0   0   0 | 1   1 |   Remaining length    |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      \                                                               \
+      / Any data, interpreted as array of [double/half]words or bytes /
+      \    e.g. ASCII/UTF-8 string, terminated/padded with 0x00's     \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+* BPF_LD128IMM:
+
+  Opcode reminds BPF_LD (0) and specifies how many to load at once, 1-3:
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   0   0   0 |Count-1|   Remaining length    |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      /                                                               /
+      \         Array of halfwords, describing pieces to load         \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+  First there are 1-3 halfwords each describing how to load pieces of
+  immediate(s) from halfwords, hereafter in which command called hextets,
+  which form final value in register(s). Each description halfword looks like:
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | Hextets Seq 1 | Hextets Seq 2 | Hextets Seq 3 |PadSkip|Registr|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+	              '               '
+        .___________./                \_______________________,
+       /                                                       \
+       +-------------+-------------+-------------+-------------+
+       |Increment hextet offset in |  Load this number of      |
+       |register by this number    |  hextets from stream      |
+       +-------------+-------------+-------------+-------------+
+
+  Offset is also incremented after putting hextets from stream, by their number.
+  So, in other words, first two bits in each sequence mean "load this number
+  of zero hextets".
+
+  Four examples of instructions where only one address is loaded into register 2.
+
+  Example 1. An address with 3 zero hextets is loaded by length 2 instruction
+  (16 bytes total).
+
+  Hextet offset       0    4    5    6    7
+  IPv6 address 1   fe80::1ff:fe23:4567:890a
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   0   0   0 | 0   0 | 0   0   0   0   0   1 |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ desc |   0   |   2   |    2  |   3   |   0   |   1   |   0   | 1   0 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0xfe80 - hextet to load by seq 1               |
+    6 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0000 - hextet to load by seq 1               |
+    8 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x01ff - hextet to load by seq 2               |
+   10 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0xfe23 - hextet to load by seq 2               |
+   12 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x4567 - hextet to load by seq 2               |
+   14 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x890a - hextet to load by seq 3               |
+   16 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+
+   1) offset is not incremented (0) as there is nothing to skip, then
+      two hextets copied (2), and offset incremented by 2
+   2) offset is incremented by 2 and now becomes 4, then 3 hextets (3+1)
+      are copied, then offset is incremented by their amount
+   3) offset is 7, one last hextet is load from stream to least significant
+      hextet of register.
+
+
+  Example 2. An address with 4 zero hextets is loaded by instruction of
+  length 2 (16 bytes total).
+
+  Hextet offset     0    1    6       7
+  IPv6 address 2   64:ff9b::1.1.255.255
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   0   0   0 | 0   0 | 0   0   0   0   0   1 |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ desc |   0   |   2   |   3   |   2   |   0   |   0   |   0   | 1   0 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0064 - hextet to load by seq 1               |
+    6 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0xff9b - hextet to load by seq 1               |
+    8 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0000 - hextet to load by seq 2               |
+   10 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0101 - hextet to load by seq 2               |
+   12 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0xffff - hextet to load by seq 2               |
+   14 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                        0x0000 - padding                       |
+   16 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+
+   1) offset is not incremented (0) as there is nothing to skip, then
+      two hextets copied (2), so then offset incremented by 2
+   2) offset was 2 and is incremented by 3, becoming 5, but this is not
+      enough to skip entire zero "::" gap, so an 0x0000 hextet is present
+      in the stream, and 3 hextets are copied from stream into register,
+      after which offset is incremented by 3 (their amount)
+   3) as offset is now 8, nothing left to do, hextet sequence 3 is ignored,
+      leftover 0x0000 hextet in the stream is padding to instruction boundary
+      and also ignored.
+
+
+  Example 3. An address with all bytes being non-zero hextets is loaded by
+  instruction of length 3, padded, 24 bytes total.
+
+  Hextet offset       0   1    2   3    4    5   6    7
+  IPv6 address 3   2001:db8:85a3:8d3:1319:8a2e:370:7348
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   0   0   0 | 0   0 | 0   0   0   0   0   1 |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ desc |   0   |   3   |   0   |   3   |   0   |   2   | 1   0 | 1   0 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                        0x0000 - padding                       |
+    6 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                        0x0000 - padding                       |
+    8 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x2001 - hextet to load by seq 1               |
+   10 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0db8 - hextet to load by seq 1               |
+   12 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x85a3 - hextet to load by seq 1               |
+   14 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x08d3 - hextet to load by seq 2               |
+   16 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x1319 - hextet to load by seq 2               |
+   18 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x8a2e - hextet to load by seq 2               |
+   20 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0370 - hextet to load by seq 3               |
+   22 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x7348 - hextet to load by seq 3               |
+   24 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+
+   1) first PadSkip is processed, giving two words of padding to skip in
+      stream.
+   2) offset is not incremented (0) as there is nothing to skip, then
+      three (3) hextets are copied from stream, so then offset is
+      incremented by 3, becoming 3
+   3) offset was 3 and not incremented (0), 3 hextets are copied from stream
+      into register, offset is incremented by 3, becoming 6
+   4) finally, two (2) hextets are loaded from stream at offset 6.
+ 
+
+  Example 4. An IPv4-compatible address (on network with old clients).
+ 
+  Hextet offset    0   6   7
+  IPv6 address 2   ::8.8.8.8
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   0   0   0 | 0   0 | 0   0   0   0   0   1 |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ desc |   3   |   0   |   3   |   0   |   0   |   2   | 1   0 | 1   0 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0808 - hextet to load by seq 3               |
+    6 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0808 - hextet to load by seq 3               |
+    8 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+
+   1) offset is incremented by 3 but nothing loaded from stream (0)
+   2) same, offset is incremented by 3 becoming 6, but nothing is taken
+      from stream
+   3) last (3rd) sequence add nothing (0) to offset and loads final 2
+      hextets from stream.
+
+
+Extended jumps, with multiple checks at once - opcodes remind BPF_JMP (5).
+
+* BPF_JUMP_TABLE:
+
+  Byte-version - low byte of register (unsigned) is used as index into table.
+  This may be useful for separate processing of each TLV chunk by type.
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   1   0   1 | 1   0 |   Remaining length    |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                    Jump offset at index 1                     |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                    Jump offset at index 2                     |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      /                                                               /
+      \                                                               \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                    Jump offset at index N                     |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+
+  For value 0, jump is not stored in table - it is implicitly first
+  instruction after jump table. For values greater than N, the same place is
+  used (as if no jump occured).
+
+TBD why same? just add "default not matched" after N, and it also could be
+padding (repeated) value
+
+* BPF_JUMP_RANGES:
+
+  Often occured task - check if a number belongs to one or more ranges in
+  short (16 bit) fields, e.g. ports or Ethernet protocol numbers. As
+  specifying jump offset for each pair would consume too much space, only
+  a single jump offset is provided - if register A & (0xffff) falls into any
+  interval.
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   1   0   1 | 0   1 |   Remaining length    |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |                    Jump offset if matched                     |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 0 low bound, inclusive                  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 0 high bound, inclusive                 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 1 low bound, inclusive                  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 1 high bound, inclusive                 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      /                                                               /
+      \                                                               \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                 Range N low bound, inclusive                  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range N high bound, inclusive                 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+
+  Ranges are inclusive, as both ipfw2 and tcpdump/libpcap 'portrange' do it
+  inclusive - it allows to use single numbers, e.g. '0-1023,6000,8000-8080'
+  is equivalent to '0-1023,6000-6000,8000-8080' and the latter is encoded.
+  Whenever padding is needed, the last range could be simply repeated.
+
+  A straightforward implementation fragment may look like:
+
+	for (i = cmdlen*2 - 1; !match && i>0; i--, p += 2)
+		match = (x>=p[0] && x<=p[1]);
+
+  Underlying hardware or JIT compiler may utilize whatever optimizations
+  available, of course.
+
+* BPF_JUMP_BITSET:
+
+  More space-efficient version of ranges when overall interval fits into
+  about 8100 above some base value - match is checked against a bit set in
+  a bitmap. First instruction dword looks like
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   1   0   1 | 0   1 |   Remaining length    |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |                    Jump offset if matched                     |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |           Base value of A above which to count bits           |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+   Subsequent dwords contain bytes with bits, which are checked against the
+   value, with a straightforward implementation's fragment like:
+
+	    if (A < k)
+		    break;
+	    A -= k; /* subtract base */
+	    match = (A < (cmdlen-1)*64) &&
+		( d[ 1 + (A>>5)] & (1<<(A & 0x1f)) );
+
+   so unused (padding) bits at end are just set to 0.
+
+=== /variant 2
+
+TBD tasks line netgraph-messages ACL may require tables much more than 512
+bytes, so larger instructions are needed, at least for data literals
+
+на самом деле, большие литералы нужны только и исключительно под DATA - в
+каждой из команд, тех же BPF_JMP, можно просто ввести суб-опкоды со ссылкой
+на литерал с таблицей, а иначе это какой-то ad hoc - но выгода от этого ad hoc
+как раз на инструкциях длиной 1-2, например сжатых LD128IMM
+
+со слишком большими jump-литералами отдельно от команд две проблемы:
+1) увеличивают расстояние для обхода условных джампов до них, а лимит
+2) валидатор: как проверять итоговый оффсет на "только вперёд", если
+   таблица-литерал может находиться как до самой команды, так и после?
+
+ну проблему 2 можно решить, положив для jump table k всегда равным 0, т.е.
+следующим после команды, и оффсеты считать от него - в остальных jump-литералах
+есть только 1-2 джампа, они могут быть в самой команде вместо литерала
+
+вообще можно придать какой-то смысл, если 0x88..0xbf отвести под длины 1..7
+и назвать их BPF_PACKED - по аналогии с ARM Thumb, MIPS16e/microMIPS or RV16E,
+потому что на нескольких 64-битных литералах тоже можно сэкономить
+
+<<Because (like Thumb-1 and MIPS16) the compressed instructions are simply
+alternate encodings (aliases) for a selected subset of larger instructions,
+the compression can be implemented in the assembler, and it is not essential
+for the compiler to even know about it. >>
+
+TODO значит в стандартных LD/LDX надо предусмотреть 64/128-битные immediate
+
+c0..d8 - 2 бита + старший байт code = 8 Kb
+e0..f8 - 2 бита + старший байт code + off = 26 бит
+
+This is 512 Mb, such a bitmap can cover entire IPv4 space.
+
+и без Base value можно обойтись, когда в нормальной команде доступно много
+регистров - просто вычесть в одном и считать с нуля
+
+===
+шаблон:
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |                                                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+для языка, если делать не Си, надо делать конвертер типов из Си и посмотреть
+языки описания структур - Wireshark, Kaitai...
+
+варианты конструкций языка low level / assembler wrapper:
+
+loop i=1 ascending to 60 { ... }
+loop i=A dsc to 0 { ... }
+msh X = pkt[14];
+index tcp = X + 14; A = tcp[0:4]; //array variable for putting to index register
+if A > 60 goto label; else { ... }
+alias B hdrsize;	// variable is actually register
+if myvar = 8 { even_one_stmt_has_braces; }
+
+func myfunc(uh var1, iw othervar)
+my (localvar1, localvar2)	// alloc 2 input registers, 2 local registers
+out (varForCalledFunc)		// and at least one output register
+{
+  body;
+  A = CalledFunc(10, varForCalledFunc);
+  if A > 63 {
+    if varForCalledFunc > 255 { return 0; }
+  }
+  return 1;
+}
+
+sequence tcp {	// we have no structs/arrays, just one compound data "type"
+    src_port 0  2;	// offset and size
+    dst_port 2  h;	// size also may be letter (halfword)
+    seq_num  4  w;
+    ack_num  8  4;
+    off_rsvd 12 1 subfields { // data offset and reserved bits
+	data_off >>=12, &= 0x0f; // subfield: ops on reg after LD main field
+    };
+    flags    13 b;
+    win      14 h
+    cksum    16 2;
+    urgent_p 18 h;
+}
+
+D = tcp[tcp.off_rsvd];	// type name and index name are in separate namespaces
+D >>= 12;
+
+TBD index tcp можно совместить - чтоб и tcp[30] и tcp.src_port работало
+
+декларация asmtmp G, H, local 2 для юзания в макросах/разворачивании
+конструкций компилятора чтоб не мешать своим переменным?
+
+index name be X+20 // just declare - you must watch X yourself
+
+/* declare, save current value in store now, do LDX from store each time index used */
+index name on DS:P using tcp take X+20 store in mem[8]
+
+A = S0:P[123]; B = DS:P[123];
