@@ -1,7 +1,7 @@
 /* To make comparison more fair, here is what in XDP .c includes from other 
  * headers
  */
-#define STAT_VERIFIERHAPPY	0
+#define STAT_PROGER_ERROR	0
 #define STAT_ETHSHORT		1
 #define STAT_VLANSHORT		2
 #define STAT_NONIP		3
@@ -17,23 +17,23 @@
 #define STAT_MAX		12	/* keep in sync */
 
 sequence tcp {	// we have no structs/arrays, just one compound data "type"
-    src_port	0  2;	// offset and size
+    src_port	0  h;	// offset and size
     dst_port	2  h;	// size also may be letter (halfword)
     seq_num 	4  w;
-    ack_num 	8  4;
+    ack_num 	8  w;
     off_rsvd	12 1 subfields { // data offset and reserved bits
 	data_off >>=12, &= 0x0f; // subfield: ops on reg after LD main field
     };
     flags	13 b;
     win  	14 h
-    cksum 	16 2;
+    cksum 	16 h;
     urgent_p	18 h;
 };
 
 #define IPPROTO_TCP	6
 
 sequence ip4hdr {
-    verlen   0  b subfields {
+    verlen	0  b subfields {
         ver  >>= 4, &= 0x0f;
 	ihl  &= 0x0f;
     };
@@ -45,15 +45,15 @@ sequence ip4hdr {
 	mf >>=13, &= 1;
 	ip_off &= 0x1fff;
     };
-    ip_ttl	8  1;
+    ip_ttl	8  b;
     protocol	9  b;
-    cksum  	10 2;
-    ip_src 	12 4;
-    ip_dst 	16 4;
+    cksum  	10 h;
+    ip_src 	12 w;
+    ip_dst 	16 w;
 };
 
-sequence ip6hdr {
-    un1_flow	0  4 subfields {
+sequence ipv6hdr {
+    un1_flow	0  w subfields {
         ver   >>= 28, &= 0x0f;
         class >>= 20, &= 0xff;
 	flow  &= 0xfffff;
@@ -73,13 +73,13 @@ sequence ip6hdr {
 #define IPPROTO_FRAGMENT 44
 
 sequence ipv6_opt_hdr {
-    nexthdr	0 1;
-    hdrlen	1 1;    
+    nexthdr	0 b;
+    hdrlen	1 b;
 };
 
 sequence ethhdr {
-    h_dest      0 6;	/* XXX */
-    h_source	6 6;
+    h_dest      0  6;	/* XXX char[6] */
+    h_source	6  6;
     h_proto	12 h;
 };
 
@@ -89,7 +89,7 @@ sequence ethhdr {
 #define ETH_P_IPV6	0x86DD
 
 sequence vlan_hdr {
-    h_vlan_TCI  0 h;
-    h_vlan_encapsulated_proto 2 h;
+    h_vlan_TCI  		0 h;
+    h_vlan_encapsulated_proto	2 h;
 };
 

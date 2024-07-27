@@ -1434,10 +1434,11 @@ k/imm |                                                               |
 варианты конструкций языка low level / assembler wrapper:
 
 loop i=1 ascending to 60 { ... }
-loop i=A dsc to 0 { ... }
+loop i=A desc to 0 { ... }
 msh X = pkt[14];
 index tcp = X + 14; A = tcp[0:4]; //array variable for putting to index register
 if A > 60 goto label; else { ... }
+if r0 == 60 jt 1 jf 2;	// label names
 alias B hdrsize;	// variable is actually register
 if myvar = 8 { even_one_stmt_has_braces; }
 
@@ -1454,16 +1455,16 @@ out (varForCalledFunc)		// and at least one output register
 }
 
 sequence tcp {	// we have no structs/arrays, just one compound data "type"
-    src_port 0  2;	// offset and size
-    dst_port 2  h;	// size also may be letter (halfword)
+    src_port 0  h;	// offset and size (halfword)
+    dst_port 2  h;	// size also may be number - for char[N]
     seq_num  4  w;
-    ack_num  8  4;
-    off_rsvd 12 1 subfields { // data offset and reserved bits
+    ack_num  8  w;
+    off_rsvd 12 b subfields { // data offset and reserved bits
 	data_off >>=12, &= 0x0f; // subfield: ops on reg after LD main field
     };
     flags    13 b;
     win      14 h
-    cksum    16 2;
+    cksum    16 h;
     urgent_p 18 h;
 }
 
@@ -1476,8 +1477,20 @@ TBD index tcp можно совместить - чтоб и tcp[30] и tcp.src_p
 конструкций компилятора чтоб не мешать своим переменным?
 
 index name be X+20 // just declare - you must watch X yourself
+index name = X+20 // just declare - you must watch X yourself
+TBD be? =? which syntax better
 
 /* declare, save current value in store now, do LDX from store each time index used */
+
+`index name use X+20 on DS:P sequence tcp in M[8];`
+
+means:
+
 index name on DS:P using tcp take X+20 store in mem[8]
 
 A = S0:P[123]; B = DS:P[123];
+
+TBD ethernet addr is char[6] so distinct letter/number in `sequence`
+сюда же инициализацию литералов
+
+в ARM есть TBB и TBH

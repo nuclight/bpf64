@@ -74,9 +74,9 @@ static int parse_ipv6(void **nh_pos, void *data_end, __u64 *l4_off)
 
 	*l4_off = sizeof(struct ipv6hdr);
 	__u8 next_hdr_type = ip6h->nexthdr;
-	struct ipv6_opt_hdr *hdr = *nh_pos + *l4_off;
 
 	for (int i = 0; i < 6; ++i) {
+		struct ipv6_opt_hdr *hdr = *nh_pos + *l4_off;
 		if (hdr + 1 > data_end) {
 			rec2stat(STAT_IP6EXTHDRSHORT);
 			return 0;
