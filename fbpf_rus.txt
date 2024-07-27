@@ -1494,3 +1494,17 @@ TBD ethernet addr is char[6] so distinct letter/number in `sequence`
 сюда же инициализацию литералов
 
 в ARM есть TBB и TBH
+
+literal somename {
+    port1 w 80;
+    port2 w 0x2c00;
+    str1  z "ASCIIZ string";
+    str2  z "another %d-printf-like\tstring\n";
+    charr с { 0x01, 0x02, 0x03 }; //character array?
+};
+
+literal myhdr use ethhdr { /* existing layout allows without type */
+    h_dest   { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, };
+    h_source { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06 };
+    h_proto  0x0800;
+};

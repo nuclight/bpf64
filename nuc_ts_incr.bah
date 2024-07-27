@@ -16,13 +16,13 @@
 #define STAT_TS_INCREMENTED	12
 #define STAT_MAX		12	/* keep in sync */
 
-sequence tcp {	// we have no structs/arrays, just one compound data "type"
+sequence tcphdr {	// we have no structs/arrays, just one compound data "type"
     src_port	0  h;	// offset and size
     dst_port	2  h;	// size also may be letter (halfword)
     seq_num 	4  w;
     ack_num 	8  w;
     off_rsvd	12 1 subfields { // data offset and reserved bits
-	data_off >>=12, &= 0x0f; // subfield: ops on reg after LD main field
+	doff >>=12, &= 0x0f; // subfield: ops on reg after LD main field
     };
     flags	13 b;
     win  	14 h

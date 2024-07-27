@@ -1,4 +1,4 @@
-#include <bpf64helpers.bah>
+#include <bpf64std.bah>
 #include "nuc_ts_incr.bah"
 
 /* C preprocessor is used */
@@ -6,7 +6,7 @@
 #define TCPOPT_TS_KIND 8  /* Timestamp option has Kind=8 */ 
 #define TCPOPT_TS_LEN 10  /* and length 10, per RFC 1323 */
 
-#define LOG bpf64_printf
+#define LOG cop bpf64_printf
 
 /* helper macros to make printing less tedious */
 #define LOG1(fmt, arg1)	printarg = arg1; LOG(fmt, printarg);
@@ -15,9 +15,9 @@
 	printarg2 = arg2;		\
 	LOG(fmt, printarg1, printarg2);
 
-/* 'pragma' is 'use' */
-use literal;	/* combine all C ""-strings in literal at start */
-/* TODO actual syntax for creating segment from it */
+/* '#pragma' is 'use' */
+use auto_str_literal(0, forlog); /* combine all C strings in literal at start */
+/* TODO stmt in main creating segment from it */
 
 /* update counters about our work, return 1 on success and 0 on fail */
 func rec2stat(error)	/* one input register, R0 */
@@ -45,7 +45,7 @@ ok:
  */
 func parse_ipv4(nh_pos, l4_off)
 my iphofs, data_end;
-out error printarg;	/* no comma - aliases to same register */
+out error printarg1;	/* no comma - aliases to same register */
 {
 	LOG1("parse_ipv4: nh_pos=%d\n", nh_pos);
 
@@ -53,7 +53,7 @@ out error printarg;	/* no comma - aliases to same register */
 	/* 
 	 * Instead of dereferencing X manually as in rec2stat(), we can
 	 * put syntax construction backed by local variable (register),
-	 * which will assign X for us onevery use, so init just once.
+	 * which will assign X for us on every use, so init just once.
 	 */
 	X = nh_pos;
 	index iph use X sequence ip4hdr in iphofs;
@@ -115,7 +115,7 @@ out error printarg;	/* no comma - aliases to same register */
 func parse_ipv6(nh_pos, l4_off)
 my iphofs, data_end, next_hdr_type,
    l4_abs;	/* absolute l4_off - from start of packet */
-out error printarg;	/* no comma - aliases to same register */
+out error printarg1, printarg2;
 {
 	data_end = P.len; /* load length of packet */
 
@@ -195,22 +195,189 @@ out error printarg;	/* no comma - aliases to same register */
 		B = hdr.hdrlen; B += 2; B *= 4;
 		l4_off += B; /* l4_off += (hdr->hdrlen + 2) * 4; */
 		next_hdr_type = hdr->nexthdr;
-		break;
+		goto endswitch;
 	one_frag:
 		l4_off += 8;
 		next_hdr_type = hdr->nexthdr;
-		break;
-	nonext:
-		/* Found a header that is not an IPv6 extension header */
-		LOG("parse_ipv6: l4_off:=%d next=%d\n", l4_off, next_hdr_type);
-		A = next_hdr_type;
-		return A;
+		goto endswitch;
 	endswitch:
+		/* End of loop. Note we just return here, but if another
+		 * loop to be expected on same loop variable, then
+		 * it should be properly terminated here first, or
+		 * exception will be thrown on new loop {}
+		 */
 	}
-
+nonext:
+	/* Found a header that is not an IPv6 extension header */
 	LOG2("parse_ipv6: l4_off:=%d next_hdr_type=%d\n", l4_off, next_hdr_type);
 	A = next_hdr_type;
 	return A;
+}
+
+/* parameters:
+ * network header start offset - in, l4 header offset - in
+ * returns: -1 format err, 0 untouched, 1 modified */
+func process_tcp(nh_pos, l4_off optoff) /* again 2 names for second register */
+my data_end, size, optkind, optlen, /* sort registers by use - in case of */
+   old_ofs, changed, open;	    /* limited JIT (pesky x86) */
+out err printarg1, printarg2;
+{
+	changed = 0; err = STAT_PROGER_ERROR;
+	data_end = P.len; /* load length of packet */
+
+	/*
+	 * We know caller won't need nh_pos anymore, and JIT prefers first
+	 * registers, so reuse register.
+	 */
+	nh_pos += l4_off;
+	LOG2("process_tcp: nh_pos:=%d l4_off=%d\n", nh_pos, l4_off);
+
+	X = nh_pos;
+	index tcph use X sequence tcphdr in nh_pos;
+
+	/*** Error-checking packet: length of fixed header */
+	B = nh_pos;	/* save some stack by global register */
+	B += sizeof tcphdr;
+	if B > data_end {
+		LOG("process_tcp: tcph+20 past end of packet\n");
+		err = STAT_TCPSHORT;
+		goto err_past_end;
+	}
+
+	size = tcph.doff; size *= 4;
+	LOG1("process_tcp: initial size=%d\n", size);
+
+	/*** Error-checking packet: header length */
+	B = nh_pos;	/* save some stack by global register */
+	B += size;
+	if B > data_end {
+		LOG("process_tcp: nh_pos=%p +size=%d\n", nh_pos, B);
+		err = STAT_TCPSHORT;
+		goto err_past_end;
+	}
+	if size < 20 {
+		err = STAT_TCPINVALID;
+		goto err_past_end;
+	}
+
+	optoff = nh_pos; /* again reused input register */
+	optoff += 20;
+	size -= 20;
+
+	if size == 0	/* no options - pass as-is */
+		return 0;
+
+	cur = optoff;
+	Y = optoff;	/* we have another index register, why not use it? */
+
+	/*** This index will point to start of currently parsed option. */
+	index opts use Y in cur;
+
+	alias D sum; 	/* this var lives in global 32-bit register */
+	alias E old; /* XXX explicit type for unsigned short? */
+
+	loop I=0 ascending to 39 {
+	        if I >= size	/* terminate loop if header shorter than */
+			last;	/* maximum allowed options size */
+		LOG("while {");
+
+		open = 261;	/* just marker to be in disasm */
+
+		/*
+		 * Note we can change index backing store variable - and doing
+		 * exactly this here to get offset from loop variable.
+		 */
+		cur = optoff + I;
+
+		/* Now parsing is easy: */
+		optkind = opts[0];
+		LOG1("optkind=%d\n", optkind);
+
+		/***
+		 * Single-byte options.
+		 */
+		if optkind == 0	/* End of Options */
+			last;
+		if optkind == 1	/* NOP */
+			next;
+
+		/***
+		 * Kind and length bytes options.
+		 */
+
+		B = cur; /* Error-checking packet: option length byte is */
+		B += 1;  /* past available header space? */
+		if B >= size {
+			LOG("cur+1 >= size: %d+1 >= %d\n", cur, size);
+			err = STAT_TCPOPTOVERFLOW;
+			goto err_past_end;
+		}
+
+		optlen = opts[1];
+		LOG1("optlen=%d\n", optlen);
+		if optlen < 2 {
+			err = STAT_TCPINVALID;
+			goto err_past_end;
+		}
+		/*
+		 * Error-checking packet: option length is larger then actual
+		 * packet? Strictly speaking, we don't need this due to
+		 * automatical loop termination - this is just to print specific
+		 * condition on the same error stat TCPOPTOVERFLOW.
+		 */
+		B = size; B -= cur;
+		if optlen > B
+			goto unclosed;
+
+		if optkind == TCPOPT_TS_KIND {
+			if changed != 0 goto err_past_end;
+			if optlen != TCPOPT_TS_LEN {
+				err = STAT_TCPINVALID;
+				goto err_past_end;
+			}
+
+			/*** increment TSval */
+			old_ofs = cur+4; // FIXME word align from tcp start
+			LOG1("old_ofs=%d\n", old_ofs);
+			old = opts[4:2]; /*** save 2 bytes for checksum */
+			C = opts[5:1];   /*** get lowest byte of timestamp */
+			C += 1;		 /* we use global register as temp */
+			opts[5:1] = C;	 /*** write incremented value back */
+			changed = 1;
+		}
+
+		open = 0;
+
+		/*** Skip to next option */
+		next I += optlen; /* Loop variable allows this! */
+	}
+	if open > 0
+		goto unclosed;
+
+	/*** Update checksum incrementally per RFC 1141 */
+	if changed != 0 {
+		C = P[old_ofs:2];
+		C = ~C;
+		sum = old + C;
+		F = tcph.cksum;
+		sum += F;
+		G = sum & 0xffff; H = sum>>16;
+		sum = G + H;
+		LOG("changing cksum to htons(%x)\n", sum);
+		tcph.cksum = sum; /* XXX again bpf_htons(sum + (sum>>16)) ? */
+		
+		return 1;
+	}
+
+	return 0;
+
+unclosed:
+	err = STAT_TCPOPTOVERFLOW;
+
+err_past_end:
+	rec2stat(err);
+	return -1;
+
 }
 
 /* TODO rewrite other nuc_ts_prog_kern.c code below this point */
