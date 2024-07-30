@@ -200,6 +200,11 @@ Subject: BPF64: proposal of platform-independent hardware-friendly eBPF alternat
 
 Hello!
 
+                                         We don't need ELF relocations!
+                                         We like language with foreach!
+                       Lie on beach, just add other case in the switch.
+                                                          -- Ping Floyd
+
 I've recently had some experience with Linux's ePBF in it's XDP, and this left
 quite negative impression. I was following via https://github.com/xdp-project/xdp-tutorial
 and after 3rd lesson was trying to create a simple program for searching TCP
@@ -428,7 +433,7 @@ BPF_MSH разрешен же только в LDX для самого X <- т.е
 а в LD реюзать BPF_MSH нельзя - вдруг ошибка программиста? в валидатор можно сунуть
 значит таки 0xc0 = BPF_IND+BPF_LEN идёт как P[Y+k:BPF_SIZE]
 
-variant 2:
+=== variant 2:
 
     MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
@@ -449,7 +454,7 @@ BPF_EXTMODE:
 #define	BPF_MEM		0x060	// 0 0 0 1 1 regs[N] <- M[k]
 #define	BPF_LEN		0x080	// 0 0 1 0 0 regs[N] <- pkt.len
 #define	BPF_MSH		0x0a0	// 0 0 1 0 1 X <- 4*(P[k:1]&0xf)
-#define	BPF_IND_Y	0x0c0	// 0 0 1 1 0 regs[N] <- P[X+k:BPF_SIZE]
+#define	BPF_IND_Y	0x0c0	// 0 0 1 1 0 regs[N] <- P[Y+k:BPF_SIZE]
 // BPF_IND+BPF_MSH	0x0e0	// 0 0 1 1 1 X <- 4*(P[X+k:1]&0xf) # when DLT unknown
 
 #define BPF_SIGN	0x400
@@ -468,6 +473,16 @@ BPF_SEG|BPF_MEM may be used in future for additional segment attributes
 for atomic operations requiring 3 arguments, only registers A or B or C or
 D are allowed as third operand, and returned (boolean) value from such
 functions is always placed in A
+
+TBD this is 5 bits for register, loop counters are prohibited to LD - use
+128-bit instead? if so, ignore BPF_SIZE, or reserve it for possible 256-bit?
+and address - for mem use M[k] & M[k+1] ? in which order?
+- what to do in BPF_ST? do we allow saving loop registers, IPv6 to pkt?
+
+TBD which mode for loading address to KERN, and which for types to KERN?
+- what if both at the same time? possible if it's k/imm only; so impl
+  remembers address and then uses either address or operand depending on
+  using instruction
 
 2. in BPF_ST
 
@@ -885,7 +900,7 @@ struct bpf_process_mem {
 	uint8_t		kreg_flags;	/* KERN reg locked? */
 	uint8_t		__align[26];	/* to 64 bytes from beginning */
 	uint64_t	g_regs[8];	/* A..H (64 bytes) */
-	struct in6_addr Y[4];		/* 128-bit registers (64 bytes) */
+	struct in6_addr Z[4];		/* 128-bit registers (64 bytes) */
 	struct bpf_backstack_frame backstack[BPF_MAX_BACKSTACK]; /* 768 bytes */
 	uint64_t	reg_window[BPF_MAX_REGWINDOW];	/* 2112 bytes */
 	uint64_t	mem[BPF_MAX_MEMWORDS];	/* 1024 bytes * */
@@ -1415,6 +1430,132 @@ This is 512 Mb, such a bitmap can cover entire IPv4 space.
 и без Base value можно обойтись, когда в нормальной команде доступно много
 регистров - просто вычесть в одном и считать с нуля
 
+
+TBD `errno` from copfuncs? or bad idea?
+
+https://nxr.netbsd.org/xref/src/sys/net/bpf_filter.c#567 seems that NetBSD's
+variant anyway 64-bit non-compatible, so let be incompatible with them (but
+refactorable for them) - e.g. let BPF_COPX be BPF_COP|BPF_X
+- no, let's better define our new code, e.g. 0x10
+TBD which additional arguments to kernel function to pass except outregs?
+
+`A = fn(bc, args, A, void *outregs, uchar nregs);`
+- let it be so? as x86_64 ABI uses registers for first 6 int/ptr args, what
+  one arg can be added here?
+
+TBD may be KERNP converted to real addr?
+- for every? it prepared for ((segnumber << 32) | offset_of_str_in_0th_literal)
+  not pointer,  so why special reg for *every* "user" function?
+- 29.07.24 let KERNP be double-purpose - on user call it contains type for
+  registers to convert to scalars
+TBD and validator should be able to check bounds of requests to create segments
+from literals, so special opcode? BPF_SYSCALL? BPF_SYSRQ
+- e.g. BPF_SYSRQ with 0 has segment lentgh in k, with 1 - signal handler in
+  KERNP, etc. ?
+- and `jf` if !0 jump in case of error (or terminate), `jt` for other means
+  ("target")
+
+жаль нельзя va_arg самому создать, придется костылить 15 макросов...
+
+хм, а как generic-обёртка для printf поймёт, какие из аргументов %p - без
+реимплементации самого printf? реально разделить понятие segment и bpf_sv
+и завернуть в скаляры вообще всё, включая инты?
+- похоже вот и 6-й аргумент - битмап, какие из регистров скаляры
+  - и 33 байта на битмапы в bpf_process_mem, а там уже столько нет...
+
+а если мы просто оборачиваем printf(9), то еще ip6_sprintf() нужен:
+	char action2[92], proto[128], fragment[32];
+	...
+#ifdef INET6
+		ip6f_mf = offset & IP6F_MORE_FRAG;
+		offset &= IP6F_OFF_MASK;
+
+		if (IS_IP6_FLOW_ID(&(args->f_id))) {
+			char ip6buf[INET6_ADDRSTRLEN];
+			snprintf(src, sizeof(src), "[%s]",
+			    ip6_sprintf(ip6buf, &args->f_id.src_ip6));
+			snprintf(dst, sizeof(dst), "[%s]",
+			    ip6_sprintf(ip6buf, &args->f_id.dst_ip6));
+
+			ip6 = (struct ip6_hdr *)ip;
+			tcp = (struct tcphdr *)(((char *)ip) + hlen);
+			udp = (struct udphdr *)(((char *)ip) + hlen);
+		} else
+#endif
+		{
+			tcp = L3HDR(struct tcphdr, ip);
+			udp = L3HDR(struct udphdr, ip);
+
+			inet_ntop(AF_INET, &ip->ip_src, src, sizeof(src));
+			inet_ntop(AF_INET, &ip->ip_dst, dst, sizeof(dst));
+		}
+
+		switch (args->f_id.proto) {
+		case IPPROTO_TCP:
+			len = snprintf(SNPARGS(proto, 0), "TCP %s", src);
+			if (offset == 0)
+				snprintf(SNPARGS(proto, len), ":%d %s:%d",
+				    ntohs(tcp->th_sport),
+				    dst,
+				    ntohs(tcp->th_dport));
+			else
+				snprintf(SNPARGS(proto, len), " %s", dst);
+			break;
+
+а нельзя так: даже если затащить libffi в ядро (чтобы генерировать va_list)
+или наклепать 2^16 макросов по длине аргументов, обёртка для printf всё равно
+не годится, потому что упадёт в случае printf("%s", 42) - своя обёртка должна
+проверять скаляры, значит :(
+
+30.07.24 if the very first instruction is literal 0xc7c7 (1600 bytes), then
+this is a program/link information
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 1   1   0   0   0   1   1   1 | 1   1   0   0   0 | BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |              'B'              |              'P'              |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |              'F'              |              '6'              |
+   k  +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |              '4'              |     Version / Format byte     |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |                  Endianness marker = 0x1234                   |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      /                                                               /
+      \   The rest is described by format, e.g. sequence for binary   \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+That is, 0xc7c7 is literal marker, and to be same for both endianness, it
+always equals to 199 more bpf_insn's, that is, 1600 bytes. Then 5 bytes
+are ASCII marker, one format/format version (of the literal) byte, and
+then 0x1234 which will be in wrong endianness if loaded on wrong architecture.
+The rest is formatted according to format/version byte. Currently, value 0
+is version 0 custom binary format, and high values are expected to be in some
+self-descirbing encoding, e.g. 0xCB proposed if CBOR is used in the future.
+
+Current version 0 literal in customary binary format is described by the
+following sequence - note that it starts from instruction itself so as to give
+proper align for subsequent uint64_t's:
+
+struct bpf_proglinkinfo_v0 {	/* header is 32 bytes (4 insns) */
+    uint16_t	insn_code;	/* 0xc7c7 */
+    char	magic[5];	/* "BPF64" */
+    uint8_t	verformat;	/* e.g. 0 */
+    uint16_t	endianness;	/* 0x1234 */
+    /* TODO required resources */
+    uint64_t	sliter_mask;	/* which segs are for literals */
+    uint64_t	sinput_mask;	/* which segs are for inputs */
+};
+
+struct bpf_progdescr_v0 {
+    uint64_t	argtypes;	/* plain regs or scalars or what */
+    uint64_t	vernamlen;	/* prog version and name length */
+    char	progname[1];	/* actually more */
+};
+TODO
+
 ===
 шаблон:
     MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
@@ -1431,7 +1572,8 @@ k/imm |                                                               |
 для языка, если делать не Си, надо делать конвертер типов из Си и посмотреть
 языки описания структур - Wireshark, Kaitai...
 
-варианты конструкций языка low level / assembler wrapper:
+варианты конструкций языка low level / assembler wrapper (bpf64awc, .baw,
+инклуды .bah):
 
 loop i=1 ascending to 60 { ... }
 loop i=A desc to 0 { ... }
@@ -1508,3 +1650,13 @@ literal myhdr use ethhdr { /* existing layout allows without type */
     h_source { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06 };
     h_proto  0x0800;
 };
+
+`kernfunc("C string", ...)` equiv to `kernfunc(0:"C string", ...)`
+really passes ((segnumber << 32) | offset_of_str_in_0th_literal)
+so a segment must be created from auto-literal before calls
+
+
+foreach b in P[20:60] { // X will be actual index, A loaded value
+    if A > 200 last;
+    ...
+}

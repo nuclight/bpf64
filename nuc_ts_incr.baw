@@ -16,21 +16,24 @@
 	LOG(fmt, printarg1, printarg2);
 
 /* '#pragma' is 'use' */
+/* use proginfo_literal("tcp_timestamp_incr") TODO */
 use auto_str_literal(0, forlog); /* combine all C strings in literal at start */
 /* TODO stmt in main creating segment from it */
 
+goto main;	/* functions and top-level labels in same namespace */
+
 /* update counters about our work, return 1 on success and 0 on fail */
-func rec2stat(error)	/* one input register, R0 */
+func rec2stat(errorno)	/* one input register, R0 */
 my value;		/* and one local register, R1 */
 {
 	A = 1;
-	if error > STAT_MAX	/* it may be 'goto', but direct 'jt' and */
+	if errorno > STAT_MAX	/* it may be 'goto', but direct 'jt' and */
 		jt fail jf ok;	/* 'jf' for short jumps are also allowed */
 fail:
 	A = 0;
-	error = STAT_PROGER_ERROR;
+	errorno = STAT_PROGER_ERROR;
 ok:
-	X = error;		/* offset can be only in index registers */
+	X = errorno;		/* offset can be only in index registers */
 	value = DS:P[X:8];	/* get current counter value to local register */
 	R1 += 1;		/* it's just alias, actual register will work */
 	DS:P[X:dw] = value;	/* shared memory in DS segment */
@@ -363,7 +366,7 @@ out err printarg1, printarg2;
 		sum += F;
 		G = sum & 0xffff; H = sum>>16;
 		sum = G + H;
-		LOG("changing cksum to htons(%x)\n", sum);
+		LOG1("changing cksum to htons(%x)\n", sum);
 		tcph.cksum = sum; /* XXX again bpf_htons(sum + (sum>>16)) ? */
 		
 		return 1;
@@ -380,4 +383,71 @@ err_past_end:
 
 }
 
-/* TODO rewrite other nuc_ts_prog_kern.c code below this point */
+func main()
+my data_end, rc, h_proto, nh_off, ipproto, done;
+out err printarg1, nh_pos, l4_off;
+{
+	rc = XDP_DROP;
+
+	data_end = P.len;
+	LOG1("got packet with length=%d\n", B);
+
+	nh_off = sizeof ethhdr;
+	if nh_off > data_end {
+		rec2stat(STAT_ETHSHORT);
+		return rc;
+	}
+
+	/* lazy for index declaration - just take it by offset in `sequence` */
+	h_proto = P[eth.h_proto:2];
+
+	/*** check VLAN tag; could be repeated to support double-tagged VLAN */
+	if h_proto == ETH_P_8021Q
+		goto vlan_parse;
+	if h_proto == ETH_P_8021AD
+		jt vlan_parse jf l3_parse;
+vlan_parse:
+	X = nh_off; /* We need it once, so don't use storage var */
+	index vhdr use X sequence vlan_hdr;
+
+	nh_off += sizeof vlan_hdr;
+	if nh_off > data_end {
+		rec2stat(STAT_VLANSHORT);
+		return rc;
+	}
+	h_proto = vhdr.h_vlan_encapsulated_proto;
+
+l3_parse:
+	nh_pos = nh_off;
+	if h_proto == ETH_P_IP {
+		ipproto = parse_ipv4(nh_pos, l4_off);
+	}
+	else if h_proto == ETH_P_IPV6 {
+		/* FIXME what to do with call here? move regwin more? */
+		ipproto = parse_ipv6(nh_pos, l4_off);
+	}
+	else {
+		rec2stat(STAT_NONIP);
+		return rc;
+	}
+
+	if ipproto != IPPROTO_TCP {
+		/* pass non-TCP untouched */
+		rec2stat(STAT_NONTCP);
+		rc = XDP_PASS;
+	} else {
+		done = process_tcp(nh_pos, l4_off);
+		if done == -1 {
+			rc = XDP_DROP;
+		} else if done == 0 {
+			rec2stat(STAT_NONTSTAMP);
+			rc = XDP_PASS;
+		} else {
+			rec2stat(STAT_TS_INCREMENTED);
+			rc = XDP_PASS;
+		}
+	}
+
+	A = rc;
+	return A;
+}
