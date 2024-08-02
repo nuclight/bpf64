@@ -197,17 +197,17 @@ out error printarg1, printarg2;
 	words_len:
 		B = hdr.hdrlen; B += 2; B *= 4;
 		l4_off += B; /* l4_off += (hdr->hdrlen + 2) * 4; */
-		next_hdr_type = hdr->nexthdr;
+		next_hdr_type = hdr.nexthdr;
 		goto endswitch;
 	one_frag:
 		l4_off += 8;
-		next_hdr_type = hdr->nexthdr;
+		next_hdr_type = hdr.nexthdr;
 		goto endswitch;
 	endswitch:
 		/* End of loop. Note we just return here, but if another
 		 * loop to be expected on same loop variable, then
 		 * it should be properly terminated here first, or
-		 * exception will be thrown on new loop {}
+		 * exception will be thrown on new `loop {}`
 		 */
 	}
 nonext:
