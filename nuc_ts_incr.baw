@@ -18,7 +18,7 @@
 /* '#pragma' is 'use' */
 /* use proginfo_literal("tcp_timestamp_incr") TODO */
 use auto_str_literal(0, forlog); /* combine all C strings in literal at start */
-/* TODO stmt in main creating segment from it */
+CREATE_SEGMENT_FROM_STRING_LITERAL(0, forlog);/* TODO actual call in macro */
 
 goto main;	/* functions and top-level labels in same namespace */
 
@@ -383,7 +383,7 @@ err_past_end:
 
 }
 
-func main()
+func main()	/* TODO setup DS segment from arguments */
 my data_end, rc, h_proto, nh_off, ipproto, done;
 out err printarg1, nh_pos, l4_off;
 {

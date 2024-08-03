@@ -195,7 +195,7 @@ BPF_LOOP_END - единственный собственно (условный) 
 
 с сего момента редактируемый черновик спеки, без отдельных записей дат по дням
 
-To: freebsd-arch, freebsd-hackers, tcpdump-workers, XXX
+To: freebsd-arch, freebsd-hackers, tcpdump-workers, TBD@netbsd.org, XXX
 Subject: BPF64: proposal of platform-independent hardware-friendly eBPF alternative
 
 Hello!
@@ -484,6 +484,9 @@ TBD which mode for loading address to KERN, and which for types to KERN?
   remembers address and then uses either address or operand depending on
   using instruction
 
+TODO let's `jt` be all related aTomicity per platform, including per-CPU etc.,
+with zero value "no such special things", and `jf` just segment number
+
 2. in BPF_ST
 
 Here existing implementations check just BPF_ST or BPF_STX, that is, BPF_IMM
@@ -730,6 +733,10 @@ TBD Rk is not enough for extended op - ranges, table...
 
 === /variant 2
 
+TBD do we really need 16-bit offset insead of jt/jf given 32-bit BPF_JA ?
+in eBPF it's needed because backward jumps are allowed (and they can't use
+`imm` there), but we have them only for loops - which may be rethought,
+and restoring jt/jf allows to free more opcodes in BPF_JMP again
 
 TBD
 
@@ -806,7 +813,7 @@ be set up with BPF_PROLOG instruction.
 
     MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
- code |               |RegWindow shift|BPF_CALL=1 | _RVAL | BPF_RET=6 |
+ code |RegWindow shift| 0/BPF_L/BPF_S |BPF_CALL=1 | _RVAL | BPF_RET=6 |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
   off |                                                               |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
@@ -814,6 +821,18 @@ k/imm |                imm (signed): pc += imm                        |
       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
        1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
          3                   2                   1
+
+TODO different calling conventions - to function by pc+imm if 0, to BPF
+machine if BPF_L and external kernel functiond when SV/segment-wrapped,
+also think about simple `k` resolving like in NetBSD bpf_ctx_t and with
+run-time (may be each call) resolving by ASCII name; SV/segment-wrapped
+means arguments are *not* in registers so they must be prepared before
+call in some temporary space - pushtr/pushtv? Perl's ST(n) ?
+
+<<
+The question remains on when the SVs which are targets for opcodes are created. The answer is that they are created when the current unit--a subroutine or a file (for opcodes for statements outside of subroutines)--is compiled. During this time a special anonymous Perl array is created, which is called a scratchpad for the current unit.
+>>
+
 
 * BPF_PROLOG:
 
@@ -826,7 +845,7 @@ k/imm |                imm (signed): pc += imm                        |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
   off |                                                               |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-k/imm |                                                               |
+k/imm |                   Offset to end of function                   |
       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
        1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
          3                   2                   1
@@ -849,6 +868,14 @@ k/imm |                                                               |
   registers became no longer needed temporaries, it can advance window for
   lesser number, leaving more space for output parameters for next call.
 
+  The `k` points to last instruction of function body - used by validator to
+  check that within these boundaries there are no jumps outside of the
+  function.
+
+TBD is this needed? e.g. if optimizing compiler decides to split
+
+TBD 02.08 вообще loop какой-то некрасивый, в Tcl у return есть дополнительные
+коды ok/error/return/break/continue - вот и генерализованные exceptions заодно
 
 * BPF_LOOP_BACK:
 
@@ -871,7 +898,11 @@ BPF_LOOP_OPEN. If result of test was false, or instruction reached by jump
 from BPF_LOOP_LAST, the loop is terminated, marked internally as reset, and
 control is passed to next instruction after BPF_LOOP_BACK.
 
-
+TBD 02.08.24 what if combine loop and call, to have "blocks" instead, with
+only one loop counter per frame and accessing others as "uplevel var"? This
+would give much higher limit on loop nesting, would allow "next J" and local
+variables in block (that is, like Perl context stack); also equivalent to
+tail recursion (hello, factorial :)
 
 struct bpf_backstack_frame {
 	uint32_t	ret_addr;
@@ -927,6 +958,7 @@ struct bpf_process_mem {
 TBD addressing mode for using `k` as pointer to string in RODATA, and string
 in segment - for dynamic dispatch
 
+TBD tailcall should be a flag to external CALL and don't waste opcode
 
 25.07.24 04:30 Эльбрус использует расширение регистрового окна два раза - вызывающая
 скрывает свои локальные, вызываемая расширяет на свои локальные
@@ -1555,6 +1587,29 @@ struct bpf_progdescr_v0 {
     char	progname[1];	/* actually more */
 };
 TODO
+
+TBD include prog size? so it can be embedded in ELF like DOF?
+
+CTF:
+<<
+   The String Section
+     The last section of the ctf file is the string section.  This section
+     encodes all of the strings that appear throughout the other sections.  It
+     is laid out as a series of characters followed by a null terminator.
+     Generally, all names are written out in ASCII, as most C compilers do not
+     allow any characters to appear in identifiers outside of a subset of
+     ASCII.  However, any extended characters sets should be written out as a
+     series of UTF-8 bytes.
+
+     The first entry in the section, at offset zero, is a single null
+     terminator to reference the empty string.  Following that, each C string
+     should be written out, including the null terminator.  Offsets that refer
+     to something in this section should refer to the first byte which begins
+     a string.  Beyond the first byte in the section being the null
+     terminator, the order of strings is unimportant.
+>>
+
+pushtr/pushtv in DTrace
 
 ===
 шаблон:
