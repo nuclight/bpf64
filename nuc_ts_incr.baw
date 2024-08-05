@@ -254,7 +254,7 @@ out err printarg1, printarg2;
 	B = nh_pos;	/* save some stack by global register */
 	B += size;
 	if B > data_end {
-		LOG("process_tcp: nh_pos=%p +size=%d\n", nh_pos, B);
+		LOG("process_tcp: nh_pos=%d +size=%d\n", nh_pos, B);
 		err = STAT_TCPSHORT;
 		goto err_past_end;
 	}

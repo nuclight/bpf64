@@ -905,7 +905,7 @@ variables in block (that is, like Perl context stack); also equivalent to
 tail recursion (hello, factorial :)
 
 struct bpf_backstack_frame {
-	uint32_t	ret_addr;
+	uint32_t	ret_addr; // XXX pc ptr is 8 bytes
 	uint8_t		reg_shift;	/* base for input registers */
 	uint8_t		reg_input;	/* locals after reg_shift+this */
 	uint8_t		reg_local;	/* local+out: reg_shift+input */
@@ -1454,6 +1454,7 @@ for the compiler to even know about it. >>
 
 TODO значит в стандартных LD/LDX надо предусмотреть 64/128-битные immediate
 
+BPF_LITERAL:
 c0..d8 - 2 бита + старший байт code = 8 Kb
 e0..f8 - 2 бита + старший байт code + off = 26 бит
 
@@ -1540,7 +1541,8 @@ from literals, so special opcode? BPF_SYSCALL? BPF_SYSRQ
 проверять скаляры, значит :(
 
 30.07.24 if the very first instruction is literal 0xc7c7 (1600 bytes), then
-this is a program/link information
+this is a program/link information - the BPF_S|BPF_CALL will use `k` as index
+into `cvtab[]` which will be populated by function pointers behind the scenes.
 
     MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
@@ -1550,7 +1552,7 @@ this is a program/link information
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
       |              'F'              |              '6'              |
    k  +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-      |              '4'              |     Version / Format byte     |
+      |              '4'              | Version/Format/2nd flag byte  |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
  code |                  Endianness marker = 0x1234                   |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
@@ -1566,27 +1568,74 @@ then 0x1234 which will be in wrong endianness if loaded on wrong architecture.
 The rest is formatted according to format/version byte. Currently, value 0
 is version 0 custom binary format, and high values are expected to be in some
 self-descirbing encoding, e.g. 0xCB proposed if CBOR is used in the future.
+Low bit (0x1) is set when 1600 bytes is not enough and another literal (next
+to this) is used.
 
 Current version 0 literal in customary binary format is described by the
 following sequence - note that it starts from instruction itself so as to give
 proper align for subsequent uint64_t's:
 
+typedef struct {		/* must be 8 byte (insn) size */
+    uint32_t	arg_name;	/* min # args reqd & strtab offset */
+    uint32_t	version;	/* prog version */
+} bpf_progdesc_t;
+
 struct bpf_proglinkinfo_v0 {	/* header is 32 bytes (4 insns) */
     uint16_t	insn_code;	/* 0xc7c7 */
     char	magic[5];	/* "BPF64" */
-    uint8_t	verformat;	/* e.g. 0 */
+    uint8_t	verformat;	/* e.g. 0, low bit  */
     uint16_t	endianness;	/* 0x1234 */
+    uint16_t	platformver;	/* min ver req, depends on platform */
+    char	platform[4];	/* zeroes if crossplatform */
+    uint16_t	flags_me_links;	/* 0 dumbfast, 1 scalar-wrapped and */
+    				/* size of me[] in low nibble */
+    uint8_t	staticsv_sz;	/* static SVs array element count */
+    uint8_t	cvtab_ofs;	/* referenced progs array offset in insns */
+    uint16_t	cvtab_sz;	/* referenced progs array element count */
+    uint16_t	strtab_ofs;	/* strings section offset in insns */
+    uint64_t	__reserved;	/* padding to 32 bytes */
+    bpf_progdesc_t	me[0];	/* what is my name(s) and version? */
     /* TODO required resources */
-    uint64_t	sliter_mask;	/* which segs are for literals */
-    uint64_t	sinput_mask;	/* which segs are for inputs */
 };
 
-struct bpf_progdescr_v0 {
-    uint64_t	argtypes;	/* plain regs or scalars or what */
-    uint64_t	vernamlen;	/* prog version and name length */
-    char	progname[1];	/* actually more */
-};
-TODO
+TBD platform be enterprise number as in syslog RFC ? ELF ABI byte?
+
+Name(s) of program itself are placed directly after header; immediately after
+them starts array of required static SV's of word-size entries:
+
+    uint32_t	staticsvs[]
+#define BPF_PRGDESC_STATICSV_TYPEMASK	0xff000000
+#define BPF_PRGDESC_STRINGOFS_MASK	0x000000ff
+
+which has type of scalar and offset to it name from beginning of strings
+section. Type byte is one char: '"" for ASCIIZ, '$' for PV and '@' for AV.
+If entire word is zero, then this segement number is reserved for a static
+literal which will be created by program at runtime - just that this number is
+reserved so caller will not create additional SVs here.
+
+As static scalars is 255 max (1020 bytes) and program names arrays are short
+enough to always fit in 1600 bytes, they don't require offsets from header.
+However, referenced programs section and/or strings section may be large, so
+for them to be not "split" in the middle by starting bytes of next BPF_LITERAL
+(which must follow immediately if (verformat & 0x1) is set), they have offsets
+from the start of the header (meaning they can't be less than 5 and 6) in
+bpf_insn's (8 byte) chunks (for alignment).
+
+    bpf_progdesc_t cvtab[svtab_sz];
+
+Format of both program itself description, in me[0] and possibly "hardlinks"
+in me[1..], and required as dependencies programs, is the same: one word
+with low 24 bits for name of program as offset into strings section
+
+TBD do we need min # of arguments? how much to reserved
+
+and another word with version. System compares versions simply as ">="
+unsigned integers, so version could be just a Unix timestamp or more
+complicated major-minor scheme as author of program chooses.
+
+NOTE this scheme is uniform - written in C helpers like printf() or other bpf
+programs all reside in same space looking like "programs" with versions
+and accepting argv[] of SVs.
 
 TBD include prog size? so it can be embedded in ELF like DOF?
 
@@ -1609,7 +1658,127 @@ CTF:
      terminator, the order of strings is unimportant.
 >>
 
-pushtr/pushtv in DTrace
+Currently in format 0 no form of pathname string compression is attempted
+(may be another section with "my name / ref to parent" will be added in 1).
+
+TBD pushtr/pushtv in DTrace
+
+TBD we can't keep SV-s directly in AV - what if references are held, and
+AV resized thus realloc()'ed?
+
+TBD SV count to prealloc so not to do it under M_NOWAIT
+
+TBD 1600 bytes too much for many programs and too small for others, may be
+change BPF_LITERAL from 0xc0 to something lower and then have several literals
+as sections? so that offsets will be not needed, just from corresponding
+literal's start
+
+TBD 32-bit words, 8 "$@&" or SI/SO, 24 bit stringref, for SV static num and
+reserved, for CV version and additional 24 bits of version on SO
+- this contradicts with simple scheme when CALL's `k` is just array index
+
+#define	BPF_SVt_NULL		0	/* undefined value  */
+#define	BPF_SVt_UB		1	/* unsigned byte */
+#define	BPF_SVt_IB		2	/* signed byte */
+#define	BPF_SVt_UH		3	/* unsigned half */
+#define	BPF_SVt_IH		4	/* signed half */
+#define	BPF_SVt_UW		5	/* unsigned word */
+#define	BPF_SVt_IW		6	/* signed word */
+#define	BPF_SVt_UD		7	/* unsigned dword */
+#define	BPF_SVt_ID		8	/* signed dword */
+#define	BPF_SVt_PV		9	/* memory region */
+#define	BPF_SVt_RV		10	/* reference to another SV */
+#define	BPF_SVt_AV		11	/* array of SV's */
+#define	BPF_SVt_CV		12	/* executable code */
+
+#define	BPF_SVf_TYPEMASK	0x0ff	/* mask for type byte */
+#define	BPF_SVf_READONLY	0x08000000
+#define	BPF_SVf_MEMOWNER	0x00000100 /* must free(svu_pv) */
+#define	BPF_SVf_MEMSHARED	0x00000200 /* several SVs point to this mem */
+
+
+/* 32 bytes - all types has same size for slab allocator */
+struct bpf_sv {
+    uint32_t	sv_flags;	/* type in low byte */
+    uint32_t	sv_refcnt;	/* how many references to us */
+    uint32_t	sv_limit;	/* max allowed size to access */
+    uint32_t	sv_offset;	/* use depends on type */
+    union {
+    	uint8_t		svu_ub;
+	int8_t		svu_ib;
+	uint16_t	svu_uh;
+	int16_t		svu_ih;
+	uint32_t	svu_uw;
+	int32_t		svu_iw;
+	uint64_t	svu_ud;
+	int64_t		svu_id;
+	char*		svu_pv;	/* pointer to malloced string */
+	struct bpf_sv*	svu_rv;	/* pointer to another SV */
+	struct in6_addr	svu_q;
+    } sv_u;
+};
+
+/* array value - casted from SV, head must match */
+struct bpf_av {
+    uint32_t	sv_flags;	/* type in low byte */
+    uint32_t	sv_refcnt;	/* how many references to us */
+    uint32_t	sv_limit;	/* max allowed size XXX bytes/elems? */
+    uint32_t	av_offset;	/* offset of 0'th element (if "shift"'s) */
+    struct bpf_sv** av_alloc;	/* pointer to beginning of C array of SVs */
+    uint32_t	av_fill;	/* Index of last element present */
+    uint32_t	av_spare;	/* reserved/alignment */
+};
+
+
+let's expand a line in process_tcp():
+    call_sv bpf64_printf("process_tcp: nh_pos=%d +size=%d\n", nh_pos, B);
+
+nh_pos is R0, first output param (err printarg1) is R9 - so register window
+shift for dumb calls is 9 (0..8)
+Let offset of fmt string ("process_tcp...") be 123 in segment 1 (usually
+scalar from literal is 0, but to demonstrate)
+references (RV) are encoded as scalar (segment) number in high 32 bits and
+offset in low 32 bits
+Let assume we have argument AV number already in AS selector register
+creating SV functions return new number in CS selector register (mnemonic
+is "created"/"current")
+
+    R9 = AS
+    CALL_L regs=9 k=av_clear	/* delete all elements from array */
+    R9 = BPF_SVt_RV		/* constant: type argument to sv_new() */
+    CALL_L regs=9 k=sv_new	/* create scalar, return be in CS */
+    LD	R9, (1 << 32) | 123	/* constant known by compiler XXX */
+    ST	R9, CS:P[0:8]		/* store reference value in new SV */
+    R9 = CS
+    CALL_L regs=9 k=av_push	/* push @argv, $fmtstr_ref */
+    CALL_L regs=9 k=sv_close	/* decrement refcount on our SV */
+    R9 = BPF_SVt_UW		/* 32 bits will be enough for offset */
+    CALL_L regs=9 k=sv_new	/* create scalar, return be in CS */
+    ST	R0, CS:P[0:4]		/* nh_pos is in R0 */
+    R9 = CS
+    CALL_L regs=9 k=av_push	/* push @argv, $nh_pos */
+    CALL_L regs=9 k=sv_close	/* sole scalar owner is now AV */
+    R9 = BPF_SVt_UW		/* 32 bits will be enough for size */
+    CALL_L regs=9 k=sv_new	/* create scalar, return be in CS */
+    ST	B, CS:P[0:4]		/* B is 32 bit, not Bd */
+    R9 = CS
+    CALL_L regs=9 k=av_push	/* push @argv, $b */
+    CALL_L regs=9 k=sv_close	/* we close SV to not leak it */
+    R9 = AS			/* where function will find argv? */
+    CALL_S regs=9 k=bpf64_printf/* finally scalar-wrapped external call */
+
+sv_close() is like close() for file descriptors - it deletes reference to
+this scalar from available segments, decrementing refcount and freeing if
+needed, so BPF program is not in direct control of refcounts and thus cannot
+make harm with it, except possibly prolonged life of leaked scalar until
+eventual program termination where free() will be done
+
+TBD av_push preserves output register?
+XXX av_push to use AS: by default?
+TBD storing in RV automatically increments refcount on referenced scalar?
+
+TBD which AV to use for such calls as argument stack? one for each prog and
+it's direct children, or one for entire chain?
 
 ===
 шаблон:
