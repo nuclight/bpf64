@@ -478,6 +478,7 @@ TBD this is 5 bits for register, loop counters are prohibited to LD - use
 128-bit instead? if so, ignore BPF_SIZE, or reserve it for possible 256-bit?
 and address - for mem use M[k] & M[k+1] ? in which order?
 - what to do in BPF_ST? do we allow saving loop registers, IPv6 to pkt?
+- use 2 instrs in LDX/STX for M[k] in 128: hi and lo
 
 TBD which mode for loading address to KERN, and which for types to KERN?
 - what if both at the same time? possible if it's k/imm only; so impl
@@ -1676,6 +1677,16 @@ literal's start
 TBD 32-bit words, 8 "$@&" or SI/SO, 24 bit stringref, for SV static num and
 reserved, for CV version and additional 24 bits of version on SO
 - this contradicts with simple scheme when CALL's `k` is just array index
+
+TBD what in argv[0] ?
+- if scalar ptr then need parent ptrs which need weak refs
+  - if it is filled by calling program then no need
+    - but this requires reverse lookup: from CALL's `k` to name
+- if full path string then need to parse, put an AV ?
+
+TODO if we add to sysctl, then header needs fields descr
+TBD and S,TYPE ? also there are types for counter(9)/their array
+
 
 #define	BPF_SVt_NULL		0	/* undefined value  */
 #define	BPF_SVt_UB		1	/* unsigned byte */
