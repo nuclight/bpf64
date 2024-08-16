@@ -905,6 +905,10 @@ would give much higher limit on loop nesting, would allow "next J" and local
 variables in block (that is, like Perl context stack); also equivalent to
 tail recursion (hello, factorial :)
 
+TBD 08.08.24 if make BPF_LOOP for only one next instruction, like REP in x86,
+then it would be for e.g. memory clear (if X++ added) or CALL to body
+
+
 struct bpf_backstack_frame {
 	uint32_t	ret_addr; // XXX pc ptr is 8 bytes
 	uint8_t		reg_shift;	/* base for input registers */
@@ -920,6 +924,13 @@ struct bpf_backstack_frame {
 #define BPF_MAX_MEMWORDS	128
 #define BPF_MAX_BACKSTACK	32
 #define BPF_MAX_REGWINDOW	264
+
+/* typed args, e.g. for printf(), 256 bytes */
+struct bpf_argv {
+	uint8_t		argc;		/* # args, 0..15 */
+	uint8_t		argtypes[15];	/* their types as in bpf_sv */
+	bpf_sv_union_t	argvalues[15];	/* and actual values like in bpf_sv */
+};
 
 /* Entire "process" and "CPU" memory - fit on 4 Kb page */
 struct bpf_process_mem {
@@ -938,6 +949,18 @@ struct bpf_process_mem {
 	uint64_t	mem[BPF_MAX_MEMWORDS];	/* 1024 bytes * */
 };
 
+TODO bpf_argv, *input_argv, scalar_table[], space for exception handlers
+
+in accepting programs, references to SVs are first created in local table and
+then numbers are converted in argv
+TBD so inside of caller's bpf_process_mem? then need some prevention for
+caller to read it back to avoid real pointers leak
+- better to place pointer so program will create SV only if/when needed,
+  but this requires 12 bytes / unaligned ptr in argdwords
+
+There is limit on bpf_argv to fit on page (to avoid malloc's for individual
+SV's) but cheat is possible by passing AV in args
+TBD should bpf_printf() flatten such arrays as in Perl?
 
 * BPF_TAILCALL:
 
@@ -960,6 +983,7 @@ TBD addressing mode for using `k` as pointer to string in RODATA, and string
 in segment - for dynamic dispatch
 
 TBD tailcall should be a flag to external CALL and don't waste opcode
+
 
 25.07.24 04:30 Эльбрус использует расширение регистрового окна два раза - вызывающая
 скрывает свои локальные, вызываемая расширяет на свои локальные
@@ -1638,7 +1662,20 @@ NOTE this scheme is uniform - written in C helpers like printf() or other bpf
 programs all reside in same space looking like "programs" with versions
 and accepting argv[] of SVs.
 
+TODO chain commit/rollback (e.g. fw ssh loss) - more complex version checking?
+- use BPF_J* itself for it, haha?
+
+TBD 13.08 ~18:11 what if even calls to local functions be via id in `k` ? like
+Perl package and it's symbol table, validator checks jumps to be inside such
+chunks
+- then what if functions from different packages expect different
+  segments/SVs?
+- каждую функцию с джампами только внутри не одобрила (видимо, оптимизации
+  компилятора помешает), а так идея вполне
+
 TBD include prog size? so it can be embedded in ELF like DOF?
+
+TBD mark area with exception handlers for validator, to disallow calls/loops
 
 CTF:
 <<
@@ -1707,14 +1744,7 @@ TBD and S,TYPE ? also there are types for counter(9)/their array
 #define	BPF_SVf_MEMOWNER	0x00000100 /* must free(svu_pv) */
 #define	BPF_SVf_MEMSHARED	0x00000200 /* several SVs point to this mem */
 
-
-/* 32 bytes - all types has same size for slab allocator */
-struct bpf_sv {
-    uint32_t	sv_flags;	/* type in low byte */
-    uint32_t	sv_refcnt;	/* how many references to us */
-    uint32_t	sv_limit;	/* max allowed size to access */
-    uint32_t	sv_offset;	/* use depends on type */
-    union {
+typedef union {
     	uint8_t		svu_ub;
 	int8_t		svu_ib;
 	uint16_t	svu_uh;
@@ -1726,7 +1756,15 @@ struct bpf_sv {
 	char*		svu_pv;	/* pointer to malloced string */
 	struct bpf_sv*	svu_rv;	/* pointer to another SV */
 	struct in6_addr	svu_q;
-    } sv_u;
+} bpf_sv_union_t;
+
+/* 32 bytes - all types has same size for slab allocator */
+struct bpf_sv {
+    uint32_t	sv_flags;	/* type in low byte */
+    uint32_t	sv_refcnt;	/* how many references to us */
+    uint32_t	sv_limit;	/* max allowed size to access */
+    uint32_t	sv_offset;	/* use depends on type */
+    bpf_sv_union_t sv_u;
 };
 
 /* array value - casted from SV, head must match */

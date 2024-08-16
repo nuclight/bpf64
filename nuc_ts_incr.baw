@@ -311,7 +311,7 @@ out err printarg1, printarg2;
 		B = cur; /* Error-checking packet: option length byte is */
 		B += 1;  /* past available header space? */
 		if B >= size {
-			LOG("cur+1 >= size: %d+1 >= %d\n", cur, size);
+			LOG2("cur+1 >= size: %d+1 >= %d\n", cur, size);
 			err = STAT_TCPOPTOVERFLOW;
 			goto err_past_end;
 		}
@@ -362,12 +362,12 @@ out err printarg1, printarg2;
 		C = P[old_ofs:2];
 		C = ~C;
 		sum = old + C;
-		F = tcph.cksum;
+		F = P[tcph.cksum];
 		sum += F;
 		G = sum & 0xffff; H = sum>>16;
 		sum = G + H;
 		LOG1("changing cksum to htons(%x)\n", sum);
-		tcph.cksum = sum; /* XXX again bpf_htons(sum + (sum>>16)) ? */
+		P[tcph.cksum] = sum; /* XXX again bpf_htons(sum + (sum>>16)) ? */
 		
 		return 1;
 	}
