@@ -6,7 +6,7 @@
 #define TCPOPT_TS_KIND 8  /* Timestamp option has Kind=8 */ 
 #define TCPOPT_TS_LEN 10  /* and length 10, per RFC 1323 */
 
-#define LOG cop bpf64_printf
+#define LOG call bpf64::printf
 
 /* helper macros to make printing less tedious */
 #define LOG1(fmt, arg1)	printarg = arg1; LOG(fmt, printarg);
@@ -64,13 +64,13 @@ out error printarg1;	/* no comma - aliases to same register */
 	/*** Error-checking packet: length of fixed header */
 	B = nh_pos;	/* save some stack by global register */
 	B += sizeof ip4hdr; /* note it doesn't know about alignment */
-	if B > data_end {
+	if B > data_end then
 		LOG1("parse_ipv4: iphdr+20 past end=%d of pkt\n", data_end);
 		/* Call may be done via prepared arguments (registers) */
 		error = STAT_IPHDRSHORT;
 		call rec2stat(); /* 'call' and args are optional */
 		return 0;
-	}
+	fi /* {} are for stack frames/datastructs, so if/then/else/fi */
 
 	/*** Error-checking packet: total length field */
 	B = P[iph.tot_len];	/* tracked index here will do */
@@ -78,21 +78,27 @@ out error printarg1;	/* no comma - aliases to same register */
 				/* B = P[X+2:2] */
 	C = B;		/* leave B for printf */
 	C += nh_pos;
-	if C > data_end {
+	if C > data_end then
 		LOG1("parse_ipv4: tot_len=%d\n", B);
 		/* Note function call with args will generate assignments */
 		/* to output registers, so you may simply write: */
 		rec2stat(STAT_IPTOTSHORT);
 		return 0;
-	}
+	fi
 
 	/*** Error-checking packet: IHL field */
 	B = iph.ihl; /* for fixed field inside struct P[] is unnecessary */
-	if B < 5 {
+	/*
+	 * Note assembler has only '>', '>=' inequalities because there
+	 * are always both `jump true` and `jump false` destinations,
+	 * so `if` allows to have else block without `then` to let you
+	 * put inverted condition (here it's marked in comment for human).
+	 */
+	if B >= 5 /* B < 5 */ else
 		LOG1("parse_ipv4: ihl=%d\n", B);
 		rec2stat(STAT_IPHDRSHORT);
 		return 0;
-	}
+	fi
 
 	B -= 5; B *= 4; B += 20;/* l4_off = 20 + 4*(iph->ihl - 5); */
 	l4_off = B;
@@ -100,10 +106,10 @@ out error printarg1;	/* no comma - aliases to same register */
 
 	/*** Error-checking packet: IHL field & real length */
 	B += nh_pos; /* if (*nh_pos + *l4_off > data_end) */
-	if B > data_end {
+	if B > data_end then
 		rec2stat(STAT_IPHDRSHORT);
 		return 0;
-	}
+	fi
 	
 	/* return values are: Accumulator and l4_off in register stack */
 	A = iph.protocol;
@@ -127,17 +133,17 @@ out error printarg1, printarg2;
 	/*** Error-checking packet: length of fixed header */
 	B = nh_pos;	/* save some stack by global register */
 	B += sizeof ipv6hdr; /* sizeof is compile-time constant */
-	if B > data_end {
+	if B > data_end then
 		rec2stat(STAT_IPHDRSHORT);
 		return 0;
-	}
+	fi
 
 	/*** Error-checking packet: total length field */
 	B = ip6h.payload_len;
-	if B > data_end {
+	if B > data_end then
 		rec2stat(STAT_IPTOTSHORT);
 		return 0;
-	}
+	fi
 
 	/*** l4_off is from start of L3 header, not entire packet */
 	l4_off = sizeof ipv6hdr;
@@ -154,8 +160,12 @@ out error printarg1, printarg2;
 	 */
 	index hdr use X sequence ipv6_opt_hdr;
 
-	/* Max 6 iterations, 'asc' means 'ascending' (I++) */
-	loop I = 0 asc to 5 do
+	/*
+	 * Max 6 iterations, counter decrements, loop body is stack frame.
+	 * Predefined name I,J,K,L are bpf64awc construct for nested loops
+	 * (allowed to be in any order of nesting), assembler has LC0..LC4.
+	 */
+	loop I = 6 {
 		/* ALU in BPF64 allows up to 3 registers */
 		l4_abs = nh_pos + l4_off;
 		X = l4_abs;
@@ -163,10 +173,10 @@ out error printarg1, printarg2;
 		/*** Error-checking packet: is fixed header contained? */
 		B = X;
 		B += 8; /* not sizeof ipv6_opt_hdr, see RFC 2460 */
-		if B > data_end {
+		if B > data_end then
 			rec2stat(STAT_IP6EXTHDRSHORT);
 			return 0;
-		}
+		fi
 
 		/*
 		 * Assembler has no switch/case, but it is still possible
@@ -179,14 +189,14 @@ out error printarg1, printarg2;
 		 * mostly filled with offset to default branch. Still,
 		 * to demonstrate...
 		 */
-		jumptable b in next_hdr_type {
+		goto literal b in next_hdr_type {
 			IPPROTO_HOPOPTS => dwords_len,
 			IPPROTO_DSTOPTS => dwords_len,
 			IPPROTO_ROUTING => dwords_len,
 			IPPROTO_MH	=> dwords_len,
 			IPPROTO_AH	=> words_len,
 			IPPROTO_FRAGMENT=> one_frag,
-			default		=> nonext,
+			default		=> nonext, /* Comma allowed */
 		};
 	dwords_len:
 		B = hdr.hdrlen; B += 1; B *= 8;
@@ -202,15 +212,16 @@ out error printarg1, printarg2;
 		l4_off += 8;
 		next_hdr_type = hdr.nexthdr;
 		goto endswitch;
+	nonext:
+		/* Terminate loop early - jump out of loop not allowed */
+		last;
 	endswitch:
-		/* End of loop. Note bad practice: we just jump out from loop
-		 * (to `nonext`) and return from function here, but if another
-		 * loop is to be expected on same loop variable, then current
-		 * loop should be properly terminated here first, or
-		 * exception will be thrown on new `loop`
+		/*
+		 * End of loop. We could put `next` here, but bpf64awc will
+		 * put it automatically if last instruction in block is not
+		 * of return family.
 		 */
-	done
-nonext:
+	}
 	/* Found a header that is not an IPv6 extension header */
 	LOG2("parse_ipv6: l4_off:=%d next_hdr_type=%d\n", l4_off, next_hdr_type);
 	A = next_hdr_type;
@@ -241,11 +252,11 @@ out err printarg1, printarg2;
 	/*** Error-checking packet: length of fixed header */
 	B = nh_pos;	/* save some stack by global register */
 	B += sizeof tcphdr;
-	if B > data_end {
+	if B > data_end then
 		LOG("process_tcp: tcph+20 past end of packet\n");
 		err = STAT_TCPSHORT;
 		goto err_past_end;
-	}
+	fi
 
 	size = tcph.doff; size *= 4;
 	LOG1("process_tcp: initial size=%d\n", size);
@@ -253,15 +264,15 @@ out err printarg1, printarg2;
 	/*** Error-checking packet: header length */
 	B = nh_pos;	/* save some stack by global register */
 	B += size;
-	if B > data_end {
+	if B > data_end then
 		LOG("process_tcp: nh_pos=%d +size=%d\n", nh_pos, B);
 		err = STAT_TCPSHORT;
 		goto err_past_end;
-	}
-	if size < 20 {
+	fi
+	if size >= 20 else /* TCP header must be at least 20 bytes */
 		err = STAT_TCPINVALID;
 		goto err_past_end;
-	}
+	fi
 
 	optoff = nh_pos; /* again reused input register */
 	optoff += 20;
@@ -279,9 +290,11 @@ out err printarg1, printarg2;
 	alias D sum; 	/* this var lives in global 32-bit register */
 	alias E old; /* XXX explicit type for unsigned short? */
 
-	loop I=0 asc to 39 {
-	        if I >= size	/* terminate loop if header shorter than */
-			last;	/* maximum allowed options size */
+	/*
+	 * Loop is allowed to be initialized from register, but will still
+	 * decrement towards zero.
+	 */
+	loop I=size {
 		LOG("while {");
 
 		open = 261;	/* just marker to be in disasm */
@@ -290,7 +303,8 @@ out err printarg1, printarg2;
 		 * Note we can change index backing store variable - and doing
 		 * exactly this here to get offset from loop variable.
 		 */
-		cur = optoff + I;
+		cur = size - I;	/* invert counter to offset from opts start */
+		cur += optoff;	/* now it's offset from start of packet */
 
 		/* Now parsing is easy: */
 		optkind = opts[0];
@@ -310,18 +324,18 @@ out err printarg1, printarg2;
 
 		B = cur; /* Error-checking packet: option length byte is */
 		B += 1;  /* past available header space? */
-		if B >= size {
+		if B >= size then
 			LOG2("cur+1 >= size: %d+1 >= %d\n", cur, size);
 			err = STAT_TCPOPTOVERFLOW;
 			goto err_past_end;
-		}
+		fi
 
 		optlen = opts[1];
 		LOG1("optlen=%d\n", optlen);
-		if optlen < 2 {
+		if optlen >= 2 else /* optlen < 2 */
 			err = STAT_TCPINVALID;
 			goto err_past_end;
-		}
+		fi
 		/*
 		 * Error-checking packet: option length is larger then actual
 		 * packet? Strictly speaking, we don't need this due to
@@ -332,12 +346,12 @@ out err printarg1, printarg2;
 		if optlen > B
 			goto unclosed;
 
-		if optkind == TCPOPT_TS_KIND {
+		if optkind == TCPOPT_TS_KIND then
 			if changed != 0 goto err_past_end;
-			if optlen != TCPOPT_TS_LEN {
+			if optlen != TCPOPT_TS_LEN then
 				err = STAT_TCPINVALID;
 				goto err_past_end;
-			}
+			fi
 
 			/*** increment TSval */
 			old_ofs = cur+4; // FIXME word align from tcp start
@@ -347,18 +361,18 @@ out err printarg1, printarg2;
 			C += 1;		 /* we use global register as temp */
 			opts[5:1] = C;	 /*** write incremented value back */
 			changed = 1;
-		}
+		fi
 
 		open = 0;
 
 		/*** Skip to next option */
-		next I += optlen; /* Loop variable allows this! */
+		next I -= optlen; /* Loop variable allows decrement be > 1 */
 	}
 	if open > 0
 		goto unclosed;
 
 	/*** Update checksum incrementally per RFC 1141 */
-	if changed != 0 {
+	if changed != 0 then
 		C = P[old_ofs:2];
 		C = ~C;
 		sum = old + C;
@@ -370,7 +384,7 @@ out err printarg1, printarg2;
 		P[tcph.cksum] = sum; /* XXX again bpf_htons(sum + (sum>>16)) ? */
 		
 		return 1;
-	}
+	fi
 
 	return 0;
 
@@ -390,13 +404,13 @@ out err printarg1, nh_pos, l4_off;
 	rc = XDP_DROP;
 
 	data_end = P.len;
-	LOG1("got packet with length=%d\n", B);
+	LOG1("got packet with length=%d\n", data_end);
 
 	nh_off = sizeof ethhdr;
-	if nh_off > data_end {
+	if nh_off > data_end then
 		rec2stat(STAT_ETHSHORT);
 		return rc;
-	}
+	fi
 
 	/* lazy for index declaration - just take it by offset in `sequence` */
 	h_proto = P[eth.h_proto:2];
@@ -411,42 +425,40 @@ vlan_parse:
 	index vhdr use X sequence vlan_hdr;
 
 	nh_off += sizeof vlan_hdr;
-	if nh_off > data_end {
+	if nh_off > data_end then
 		rec2stat(STAT_VLANSHORT);
 		return rc;
-	}
+	fi
 	h_proto = vhdr.h_vlan_encapsulated_proto;
 
 l3_parse:
 	nh_pos = nh_off;
-	if h_proto == ETH_P_IP {
+	if h_proto == ETH_P_IP then
 		ipproto = parse_ipv4(nh_pos, l4_off);
-	}
-	else if h_proto == ETH_P_IPV6 {
+	elif h_proto == ETH_P_IPV6 then
 		/* FIXME what to do with call here? move regwin more? */
 		ipproto = parse_ipv6(nh_pos, l4_off);
-	}
-	else {
+	else
 		rec2stat(STAT_NONIP);
 		return rc;
-	}
+	fi
 
-	if ipproto != IPPROTO_TCP {
+	if ipproto != IPPROTO_TCP then
 		/* pass non-TCP untouched */
 		rec2stat(STAT_NONTCP);
 		rc = XDP_PASS;
-	} else {
+	else
 		done = process_tcp(nh_pos, l4_off);
-		if done == -1 {
+		if done == -1 then
 			rc = XDP_DROP;
-		} else if done == 0 {
+		elif done == 0 then
 			rec2stat(STAT_NONTSTAMP);
 			rc = XDP_PASS;
-		} else {
+		else
 			rec2stat(STAT_TS_INCREMENTED);
 			rc = XDP_PASS;
-		}
-	}
+		fi
+	fi
 
 	A = rc;
 	return A;
