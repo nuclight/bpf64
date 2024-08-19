@@ -105,10 +105,9 @@ out error printarg1;	/* no comma - aliases to same register */
 		return 0;
 	}
 	
-	/* return values are: Accumulator and l4_off in stack */
+	/* return values are: Accumulator and l4_off in register stack */
 	A = iph.protocol;
 	return A; 
-
 }
 
 /* parameters:
@@ -155,8 +154,8 @@ out error printarg1, printarg2;
 	 */
 	index hdr use X sequence ipv6_opt_hdr;
 
-	/* Max 6 iterations, 'asc' is synonym for 'ascending' */
-	loop I = 0 asc to 5 {
+	/* Max 6 iterations, 'asc' means 'ascending' (I++) */
+	loop I = 0 asc to 5 do
 		/* ALU in BPF64 allows up to 3 registers */
 		l4_abs = nh_pos + l4_off;
 		X = l4_abs;
@@ -204,12 +203,13 @@ out error printarg1, printarg2;
 		next_hdr_type = hdr.nexthdr;
 		goto endswitch;
 	endswitch:
-		/* End of loop. Note we just return here, but if another
-		 * loop to be expected on same loop variable, then
-		 * it should be properly terminated here first, or
-		 * exception will be thrown on new `loop {}`
+		/* End of loop. Note bad practice: we just jump out from loop
+		 * (to `nonext`) and return from function here, but if another
+		 * loop is to be expected on same loop variable, then current
+		 * loop should be properly terminated here first, or
+		 * exception will be thrown on new `loop`
 		 */
-	}
+	done
 nonext:
 	/* Found a header that is not an IPv6 extension header */
 	LOG2("parse_ipv6: l4_off:=%d next_hdr_type=%d\n", l4_off, next_hdr_type);
@@ -279,7 +279,7 @@ out err printarg1, printarg2;
 	alias D sum; 	/* this var lives in global 32-bit register */
 	alias E old; /* XXX explicit type for unsigned short? */
 
-	loop I=0 ascending to 39 {
+	loop I=0 asc to 39 {
 	        if I >= size	/* terminate loop if header shorter than */
 			last;	/* maximum allowed options size */
 		LOG("while {");

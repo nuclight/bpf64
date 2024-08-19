@@ -487,6 +487,8 @@ TBD which mode for loading address to KERN, and which for types to KERN?
 
 TODO let's `jt` be all related aTomicity per platform, including per-CPU etc.,
 with zero value "no such special things", and `jf` just segment number
+- 18.08 or not: counter(9), their array, magic... may be 4 bits for type
+  (system-dependent), 0xf0..f9 for RODATA segments, 0xfa..0xff selectors?
 
 2. in BPF_ST
 
@@ -754,6 +756,9 @@ k/imm |     Start value: imm (signed) if BPF_K or R26(k) if BPF_X     |
        1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
          3                   2                   1
 
+TODO `while` flag for `while(){}` / `do{}while()` - do test in BPF_LOOP_BACK
+immediately after load or execute body at least once
+
 BPF_LOOP_NEXT:
 
     MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
@@ -773,7 +778,15 @@ validator MUST strictly check that there is no NEXT I inside loop on j, k, l
 and no NEXT J or NEXT I in loops on k, l, etc. - that is, that nesting is
 proper
 
-TBD
+TBD 18.08 seems that OPEN/BACK will be a special catch block, but with
+scanning till finding BPF_LOOP_BACK in case of return next/last, which are
+the Tcl's way, so there will LC0..LC3 for upper stack frames - and
+"short simple" loop form (without call) is the only which utilizes LC0; and
+so syntax must be changed: {} are [prolog] blocks of stack frames, so loop
+do/done and if/then/fi instead of braces, highlighting the fact labels are
+local to block; so no NEXT/LAST opcodes - move them to BPF_EXIT, and rethink
+syntax of variable declarations as they can now be in every block (even
+somewhat like to closures and anon/nested subs?)
 
 
 6. in BPF_RET
@@ -834,6 +847,9 @@ call in some temporary space - pushtr/pushtv? Perl's ST(n) ?
 The question remains on when the SVs which are targets for opcodes are created. The answer is that they are created when the current unit--a subroutine or a file (for opcodes for statements outside of subroutines)--is compiled. During this time a special anonymous Perl array is created, which is called a scratchpad for the current unit.
 >>
 
+TODO jt != 0 & jf != 0 - it's `catch` (pairs like 'error => labelname' in awc)
+TBD or not in `call`? where to capture other [trappable] exceptions?
+- loop meta-body (with call(s) inside) seems like natural catch{} block
 
 * BPF_PROLOG:
 
@@ -853,7 +869,7 @@ k/imm |                   Offset to end of function                   |
 
   Caller reserves it's output registers number to maximum of any called
   function can accept. Thus every called function must declare how many
-  it has input registers actuall - and reserves rest of space for both local
+  it has input registers actually - and reserves rest of space for both local
   and it's own output registers. Then, when it's time to do it's own call,
   it knows how many local registers it has and advances window by this number
   in BPF_CALL.
@@ -908,6 +924,14 @@ tail recursion (hello, factorial :)
 TBD 08.08.24 if make BPF_LOOP for only one next instruction, like REP in x86,
 then it would be for e.g. memory clear (if X++ added) or CALL to body
 
+
+#define BPF_BSFLAGS_LOOP_MASK	0x03	/* loop state bits */
+#define BPF_BSFLAGS_LOOP_NONE	0	/* not started, throw on LC access */
+#define BPF_BSFLAGS_LOOP_ASC	1	/* counter incrementing \ die on   */
+#define BPF_BSFLAGS_LOOP_DESC	2	/* counter decrementing / new loop */
+#define BPF_BSFLAGS_LOOP_DONE	3	/* finished, l.counter accessible */
+#define BPF_BSFLAGS_PROLOGSEEN	0x04	/* BPF_PROLOG was issued */
+#define BPF_BSFLAGS_CATCHING	0x08	/* return will be to BPF_CATCH */
 
 struct bpf_backstack_frame {
 	uint32_t	ret_addr; // XXX pc ptr is 8 bytes
@@ -1667,11 +1691,26 @@ TODO chain commit/rollback (e.g. fw ssh loss) - more complex version checking?
 
 TBD 13.08 ~18:11 what if even calls to local functions be via id in `k` ? like
 Perl package and it's symbol table, validator checks jumps to be inside such
-chunks
+chunks; everything called on one bpf_process_mem, not several - no mallocs
+and no SVs for simple scalar arguments like integers!
 - then what if functions from different packages expect different
   segments/SVs?
+  - so some static segments must be local to bpf_ctx_t context
+- then need to save bpf_ctx_t in each stack frame
+  - so loops must be redone, in 24 byte frame 2 ptrs and reg info leave space
+    only for 2 uint16_t loops or 1 uint32_t or some union must be employed
+    - 17.08 possible to save bpf_ctx_t as 8 byte ptr, but uint32_t pc as
+      offset from context start - makes call/return slower
+      - but slower in VM, JIT can have backstack in real stack
+	- no, that defeats whole idea of ROP protection by backstack
 - каждую функцию с джампами только внутри не одобрила (видимо, оптимизации
   компилятора помешает), а так идея вполне
+- 16.08 ipfwng chain необязательно RB-tree - можно в отдельный literal засунуть
+  смещения rule numbers и иметь такую же BPF-программу
+- ok, bpf_printf() has fmt str so don't need SVs, but other C funcs? and
+  what about 128-bit registers / their arg passing, to printf() also?
+  - можно костыль с регистром, где каждый байт ссылается на регистр/M[]
+
 
 TBD include prog size? so it can be embedded in ELF like DOF?
 
@@ -1714,6 +1753,13 @@ literal's start
 TBD 32-bit words, 8 "$@&" or SI/SO, 24 bit stringref, for SV static num and
 reserved, for CV version and additional 24 bits of version on SO
 - this contradicts with simple scheme when CALL's `k` is just array index
+  - see 13.08: if this is array of function pointers (which it should be for
+    performance) then it anyway will be built in run time and not referred via
+    literal on each call, so it's enough to do some checking "this is k+1"
+    when building it, thus encoding scheme can be any (but for CBOR need to
+    think about simplicity of string compression, separate string section
+    still looks better if that strings will be usable from BPF program)
+
 
 TBD what in argv[0] ?
 - if scalar ptr then need parent ptrs which need weak refs
