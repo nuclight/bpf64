@@ -164,6 +164,8 @@ out error printarg1, printarg2;
 	 * Max 6 iterations, counter decrements, loop body is stack frame.
 	 * Predefined name I,J,K,L are bpf64awc construct for nested loops
 	 * (allowed to be in any order of nesting), assembler has LC0..LC4.
+	 * As in this loop's body counter variable is not used, it could
+	 * have been declared as simply `loop 6 {`
 	 */
 	loop I = 6 {
 		/* ALU in BPF64 allows up to 3 registers */

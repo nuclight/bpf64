@@ -495,6 +495,8 @@ with zero value "no such special things", and `jf` just segment number
     - well, generic %map can include type and accessor funcs ("tied HV"), so
       code from ipfw tables could be reused to be independent space in sysctl
 
+TBD naming: global? extern?
+
 2. in BPF_ST
 
 Here existing implementations check just BPF_ST or BPF_STX, that is, BPF_IMM
@@ -1032,6 +1034,7 @@ TBD let's try how this look in code...
 			pc += (int)pc->jt; // XXX
 			continue;
 
+TBD ok, it's single instruction now, then why 3 states? they are now impossible?
 
 
 
@@ -1644,6 +1647,7 @@ from literals, so special opcode? BPF_SYSCALL? BPF_SYSRQ
   KERNP, etc. ?
 - and `jf` if !0 jump in case of error (or terminate), `jt` for other means
   ("target")
+- 21.08 creating segments from literals should be done by header, not code
 
 жаль нельзя va_arg самому создать, придется костылить 15 макросов...
 
@@ -1867,6 +1871,80 @@ reserved, for CV version and additional 24 bits of version on SO
     when building it, thus encoding scheme can be any (but for CBOR need to
     think about simplicity of string compression, separate string section
     still looks better if that strings will be usable from BPF program)
+  - 20.08 just sequence of VarUInt32 ?
+    - then not enough for version, so 60 bit varint?
+      - 21.08 define version as bytestring so memcmp() for any format user wants
+
+int key_compare(const void *key1, int len1, const void *key2, int len2){
+  int c = memcmp(key1, key2, len1<len2 ? len1 : len2);
+  if( c==0 ) c = len1 - len2;
+  return c;
+}
+
+separate export/import list - in export namespace "cd" may create, in import
+non-existent path causes load error 
+generic attributes like in Perl:
+public funcname :version("abc") :expensive :input(var1,var2) { ... }
+put (sysctl) description amongst them
+
+       Version Strings
+
+       A literal of the form "v1.20.300.4000" is parsed as a string composed
+       of characters with the specified ordinals.  This form, known as
+       v-strings, provides an alternative, more readable way to construct
+       strings, rather than use the somewhat less readable interpolation form
+       "\x{1}\x{14}\x{12c}\x{fa0}".  This is useful for representing Unicode
+       strings, and for comparing version "numbers" using the string
+       comparison operators, "cmp", "gt", "lt" etc.  If there are two or more
+       dots in the literal, the leading "v" may be omitted.
+
+           print v9786;              # prints SMILEY, "\x{263a}"
+           print v102.111.111;       # prints "foo"
+           print 102.111.111;        # same
+
+       Such literals are accepted by both "require" and "use" for doing a
+       version check.
+
+23.08 02:00 okay, FreeBSD sysctl has linked lists / O(N), so to speed up loading
+at least to some degree, no linear list with "foo::bar::baz" entry each, only
+walk to node and {creating/checking} leafs with params. Thus a series of
+commands:
+
+* VarUInt32, low 7 bits operation code, rest number N of arguments to command:
+  this way commands will still look as ASCII in debug/hexdump, and '}' will
+  even occupy just one byte
+* N (may be 0) VarUInt32's of arguments to command, each has type in low
+  2 bits, rest bits we name K:
+  * 00 - ASCIIZ string, K is offset in strings section
+  * 01 - binary string or integer follows, K means:
+    * 0..10 - these integers themselves
+    * 11-14 - in next 2^P bytes, where P=K-11, follows unsigned integer
+    * K>=15 - binary string of K-15 bytes follows
+  * 10 - reserved for a sublist, with K elements (same format)
+  * 11 - Reserved
+
+TBD cbor-like with 0x80+ ? move bin strings to separ sect, ints too and only
+4/8 size (as we have varint itself for lesser), offs in 4 byte units so only varints in main section, like in SQLite?
+
+23.08 04:00 well, one-argument may be achieved by setting "registers" to:
+#define	CTL_SYSCTL_NAME		1	/* string name of OID */
+#define	CTL_SYSCTL_OIDFMT	4	/* OID's kind and format */
+#define	CTL_SYSCTL_OIDDESCR	5	/* OID's description */
+#define	CTL_SYSCTL_OIDLABEL	6	/* aggregation label */
+and instead sublists just put child nodes?
+
+TBD NetBSD does not have label format string (and has lesser int types), but has
+"node version" and supports "/" separator (in addition to ".") and API like
+"//create=local.esm_debug,type=int,symbol=esm_debug,flags=w"
+
+24.08 01:40 оно же не вполне на sysctl ложится - ведь в Foo::Bar::Baz
+у Foo::Bar могут быть свои sub{}, Perl это решает просто конвенцией про
+с большой буквы; может аналогом html сделать?
+<namespace name="Foo" $=abc &entry=0x123 &version=1.20.30 ...>
+
+
+but overall language should be that [probably in-kernel] disassembler output, while
+uncomfortable, is compilable by bpf64awc into same bytecode
 
 
 TBD what in argv[0] ?
@@ -1982,6 +2060,67 @@ TBD storing in RV automatically increments refcount on referenced scalar?
 
 TBD which AV to use for such calls as argument stack? one for each prog and
 it's direct children, or one for entire chain?
+
+DEBUG:
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |                               | 1   1   1   0   0 | BPF_MISC=7|
+      +        Literal  Length        +---+---+---+---+---+---+---+---+
+  off |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |              'D'              |              'B'              |
+   k  +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |              'G'              | Version/Format|Zip|PaddingLen |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+
+As this section is for userland, it may be compressed if Zip flag is set, with
+format detected by signature in data, and PaddingLen specifies how many bytes
+at end are subtracted from literal (as it is multiple of 8 bytes), and is
+not interpreted by kernel.
+TODO simplified https://dwarfstd.org/doc/DWARF4.pdf Section 6.2 with
+references to 2 strings sections: own inside this DBG and common in PKG;
+also in each frag an optional argument to string with fragment of source at
+that coordiantes, to decompile for e.g. is source file lost - sysadmins often
+need to view loaded firewall rules (working system may differ from what
+recorded in files), but traditional firewalls restrict format to be able to
+decompile rules which restrict optimization ability - decompilation info
+in debug section should mitigate this
+
+  MSB 3 2                 2 1                 1                   LSB
+    1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   | Instructions size (offset to strings section from end of hdr) |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |   line_base   |  line_range   |             Flags             |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+just sequence of VarUInt32 ?
+
+BPFDBG_LNOP_copy
+BPFDBG_LNOP_advance_pc
+BPFDBG_LNOP_set_pc
+BPFDBG_LNOP_inc_line
+BPFDBG_LNOP_dec_line
+BPFDBG_LNOP_set_column
+BPFDBG_LNOP_negate_stmt
+BPFDBG_LNOP_set_basic_block
+BPFDBG_LNOP_set_prologue_end
+BPFDBG_LNOP_set_epilogue_begin
+BPFDBG_LNOP_end_sequence
+BPFDBG_LNOP_set_discriminator
+BPFDBG_LNOP_set_file
+BPFDBG_LNOP_define_file ? or merge with set_file due to string offset?
+BPFDBG_LNOP_set_fragment - string offset to code fragment in this column
+
+        2                |2 1            |    1      |
+        9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       |           Immediate Argument          |SubOp|1 1 1 1|NArgs|
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+TBD huh, line info is not full debug, need func and variable names, and
+possibly other info which will be clear after bpf64awc export/import... or
+func names is in PKG ? only public...
 
 ===
 шаблон:
