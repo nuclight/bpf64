@@ -497,6 +497,11 @@ with zero value "no such special things", and `jf` just segment number
 
 TBD naming: global? extern?
 
+TODO make distinguishable from CBOR: 0xd9 is in BPF_LDX class
+d9 d9f7                       # tag(55799)
+with BPF_MODE 0xc0 and BPF_B size
+so don't use 0xc0 ? seems ERR here...
+
 2. in BPF_ST
 
 Here existing implementations check just BPF_ST or BPF_STX, that is, BPF_IMM
@@ -1037,6 +1042,7 @@ TBD let's try how this look in code...
 TBD ok, it's single instruction now, then why 3 states? they are now impossible?
 
 
+TBD 31.08.24 if verifier is simple, but having killed by timeout is too ugly for solution, may be statistical approach: if program consumed too much time on a first few launches, mark it as bad?
 
 #define BPF_BSFLAG_LOOP_MASK	0x03	/* loop state bits */
 #define BPF_BSFLAG_LOOP_NONE	0	/* not started, throw on LC access */
@@ -1053,7 +1059,8 @@ struct bpf_backstack_frame {
 	uint8_t		reg_input;	/* locals after reg_shift+this */
 	uint8_t		reg_local;	/* local+out: reg_shift+input */
 	uint8_t		flags;		/* is loop active & other */
-	uint32_t	loop_counter;	/* value for loop counter */
+	uint16_t	start_tick;	/* profiling/kill: time entered */
+	uint16_t	loop_counter;	/* value for loop counter */
 };
 
 #define BPF_MAX_MEMWORDS	128
@@ -1070,7 +1077,7 @@ struct bpf_argv {
 /* Entire "process" and "CPU" memory - fit on 4 Kb page */
 struct bpf_process_mem {
 	STAILQ_ENTRY ...		/* XXX other housekeeping */
-	struct bpf_insn *pc;		/* current program counter */
+	uint64_t	start_tick;	/* do we run too much? base for bsp */
 	struct bpf_insn *kreg_pc;	/* pc when KERN register written */
 	uint16_t	ds, es;		/* segment selector registers */
 	uint32_t	X, Y;		/* index registers */
@@ -1933,14 +1940,53 @@ TBD cbor-like with 0x80+ ? move bin strings to separ sect, ints too and only
 #define	CTL_SYSCTL_OIDLABEL	6	/* aggregation label */
 and instead sublists just put child nodes?
 
-TBD NetBSD does not have label format string (and has lesser int types), but has
-"node version" and supports "/" separator (in addition to ".") and API like
+TBD NetBSD does not have label & format string (and has lesser int types) and
+restricts names to [A-Za-z0-9_-], but has "node version" (though it's API
+version, not data) and supports "/" separator (in addition to ".") and API like
 "//create=local.esm_debug,type=int,symbol=esm_debug,flags=w"
 
 24.08 01:40 оно же не вполне на sysctl ложится - ведь в Foo::Bar::Baz
 у Foo::Bar могут быть свои sub{}, Perl это решает просто конвенцией про
 с большой буквы; может аналогом html сделать?
 <namespace name="Foo" $=abc &entry=0x123 &version=1.20.30 ...>
+
+02.09 01:00 не совсем так, в Perl stash=хэш с именем Bar:: т.е. sub'ы не могут
+иметь такой символ в имени
+struct gp {
+    SV *	gp_sv;		/* scalar value */
+    struct io *	gp_io;		/* filehandle value */
+    CV *	gp_cv;		/* subroutine value */
+    U32		gp_cvgen;	/* generational validity of cached gp_cv */
+    U32		gp_refcnt;	/* how many globs point to this? */
+    HV *	gp_hv;		/* hash value */
+    AV *	gp_av;		/* array value */
+    CV *	gp_form;	/* format value */
+    GV *	gp_egv;		/* effective gv, if *glob */
+    PERL_BITFIELD32 gp_line:31;	/* line first declared at (for -w) */
+    PERL_BITFIELD32 gp_flags:1;
+    HEK *	gp_file_hek;	/* file first declared in (for -w) */
+};
+но в sysctl (особенно NetBSD) для админа не запихнешь лишние :: в каждом уровне
+
+24.08 also this reminds abandoned "cd 1.2.3.5; cd .." in previous versions of
+muSCTP draft, so try to converge both?
+- 28.08 the difference is, here in BPF64 we have everything at once (or in
+  two, import/export), so "cd node" makes sense for compression, but muSCTP
+  operates on just one or several values, so Compress::LZF is better for
+  repeated paths there
+
+bpf64.namespace.foo.bar
+bpf64.namespace.foo.bar.baz
+bpf64.namespace.foo.bar.baz.$: abcd efgh segment value
+bpf64.namespace.foo.bar.baz.&: { code_struct=members version=0x123 }
+
+TBD 02.09 02:54 is version needed at all for every *function* ? in every
+mainstream (scripting) language it's not so: version is attribute of package,
+not function (though in some package may export different by required version),
+we just try to solve ABI versioning here as in libfoo.so.6 ? in any way, how
+compatibility versions are supposed to coexist - sysctl has just one name?
+- this was because first idea was about interacting BPF "programs", with
+  argc/argv (in SVs), instead of "functions"
 
 
 but overall language should be that [probably in-kernel] disassembler output, while
