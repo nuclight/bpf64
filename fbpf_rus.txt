@@ -1975,11 +1975,6 @@ muSCTP draft, so try to converge both?
   operates on just one or several values, so Compress::LZF is better for
   repeated paths there
 
-bpf64.namespace.foo.bar
-bpf64.namespace.foo.bar.baz
-bpf64.namespace.foo.bar.baz.$: abcd efgh segment value
-bpf64.namespace.foo.bar.baz.&: { code_struct=members version=0x123 }
-
 TBD 02.09 02:54 is version needed at all for every *function* ? in every
 mainstream (scripting) language it's not so: version is attribute of package,
 not function (though in some package may export different by required version),
@@ -2022,6 +2017,24 @@ TBD 03.09 04:00 ok, that's simple, but where to keep e.g. time keeping - again
 attributes? just that not so dependent on import/export format now, but still
 has to have place in sysctl
 
+bpf64.namespace.foo.bar
+bpf64.namespace.foo.bar.baz
+bpf64.namespace.foo.bar.baz.$: "abcd efgh segment value"
+bpf64.namespace.foo.bar.baz.&: { code_struct=members version=0x123 }
+bpf64.namespace.foo.bar.baz.*attributes
+bpf64.namespace.foo.bar.baz.*attributes.input: "nh_pos, l4_off"
+bpf64.namespace.foo.bar.baz.*attributes.version: 1668969726
+
+    MSB                                                               LSB
+       63   56 55 53 52                29 28                         0
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+      |  'a'  |4Type|   Attribute name   |     Attribute value        |
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+
+TBD not only debug section, but doc (POD) section? with hash ident of main
+prog; and place them in swappable memory instead of wired
+
+sysctl -b vfs.nfs.diskless_rootaddr > file.bin
 
 
 
@@ -2246,6 +2259,9 @@ Perl6::Export::Attrs and :input and so on
 TODO frags: 3 VarUInt32's inc_line, inc_col, frag_len - this is 3 bytes
 instead of one for typical 80-column one-statement line
 ...sounds like early PBMFS?
+
+also DOC (POD) section? so 2 bits: 3 sources of fragment (PKG, DBG, DOC) and
+"recover by decompile", e.g. large (jump) table
 
 ===
 шаблон:
