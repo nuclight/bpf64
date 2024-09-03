@@ -1988,6 +1988,42 @@ compatibility versions are supposed to coexist - sysctl has just one name?
 - this was because first idea was about interacting BPF "programs", with
   argc/argv (in SVs), instead of "functions"
 
+    MSB                                                               LSB
+       63   56 55                      29 28                         0
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+      |  '{'  |                          |       Namespace name       |
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+
+    MSB                                                               LSB
+       63   56 55                   32 31                            0
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+      |  '&'  |    Function name      |        Entry point / k        |
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+
+    MSB                                                               LSB
+       63   56 55                   32 31                    8 7     0
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+      |  '$'  |   Segment (SV) name   |    Type (fmt) name    |N/Ctltp|
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+
+    MSB                                                               LSB
+       63   56 55                      29 28                         0
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+      |  'd'  |Platform: label / API ver |       Description          |
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+
+    MSB                                                               LSB
+       63   56 55                                                    0
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+      |  'v'  |                    Version                            |
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+
+TBD 03.09 04:00 ok, that's simple, but where to keep e.g. time keeping - again
+attributes? just that not so dependent on import/export format now, but still
+has to have place in sysctl
+
+
+
 
 but overall language should be that [probably in-kernel] disassembler output, while
 uncomfortable, is compilable by bpf64awc into same bytecode
@@ -2126,7 +2162,7 @@ not interpreted by kernel.
 TODO simplified https://dwarfstd.org/doc/DWARF4.pdf Section 6.2 with
 references to 2 strings sections: own inside this DBG and common in PKG;
 also in each frag an optional argument to string with fragment of source at
-that coordiantes, to decompile for e.g. is source file lost - sysadmins often
+that coordiantes, to decompile for e.g. if source file lost - sysadmins often
 need to view loaded firewall rules (working system may differ from what
 recorded in files), but traditional firewalls restrict format to be able to
 decompile rules which restrict optimization ability - decompilation info
@@ -2135,38 +2171,81 @@ in debug section should mitigate this
   MSB 3 2                 2 1                 1                   LSB
     1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   | Instructions size (offset to strings section from end of hdr) |
+   |HdrSz|Instructions size (offset to strings section from hdrend)|
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
    |   line_base   |  line_range   |             Flags             |
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
 just sequence of VarUInt32 ?
 
-BPFDBG_LNOP_copy
-BPFDBG_LNOP_advance_pc
-BPFDBG_LNOP_set_pc
-BPFDBG_LNOP_inc_line
-BPFDBG_LNOP_dec_line
-BPFDBG_LNOP_set_column
-BPFDBG_LNOP_negate_stmt
-BPFDBG_LNOP_set_basic_block
-BPFDBG_LNOP_set_prologue_end
-BPFDBG_LNOP_set_epilogue_begin
-BPFDBG_LNOP_end_sequence
-BPFDBG_LNOP_set_discriminator
-BPFDBG_LNOP_set_file
+BPFDBG_LNOP_copy		- 0 operands
+BPFDBG_LNOP_advance_pc		- 1 operand
+BPFDBG_LNOP_set_pc		- 1 operand
+BPFDBG_LNOP_inc_line		- 1 operand
+BPFDBG_LNOP_dec_line		- 1 operand
+BPFDBG_LNOP_set_column		- 1 operand
+BPFDBG_LNOP_negate_stmt		- 0 operands
+BPFDBG_LNOP_set_basic_block	- 0 operands
+BPFDBG_LNOP_set_prologue_end	- 0 operands
+BPFDBG_LNOP_set_epilogue_begin	- 0 operands
+BPFDBG_LNOP_end_sequence	- 0 operands
+BPFDBG_LNOP_set_discriminator	- 1 operand
+BPFDBG_LNOP_set_file		- 1/4 operands???
 BPFDBG_LNOP_define_file ? or merge with set_file due to string offset?
 BPFDBG_LNOP_set_fragment - string offset to code fragment in this column
 
         2                |2 1            |    1      |
         9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-       |           Immediate Argument          |SubOp|1 1 1 1|NArgs|
+       |           Immediate Argument        |NumArgs|1 1 1 1|SubOp|
        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
 TBD huh, line info is not full debug, need func and variable names, and
 possibly other info which will be clear after bpf64awc export/import... or
 func names is in PKG ? only public...
+
+TBD 02.09 seems that decompilation requirement drastically change format: DWARF
+special opcodes only increment `pc` and line, but as we have *assembly*
+wrapper, then several statements per line will be more often (see e.g.
+`parse_ipv6()` in `nuc_ts_incr.baw`)... Probably every file should first be
+split into fragments (each having line/column) of text, and then those
+fragments would be referenced in state machine / producing matrix
+
+External container is in CBOR (RFC 7049) format, allowing easy extensibility,
+any amount of structure nesting, and still allowing to parse it in the kernel
+in the unlikely case such need arises.
+
+55799([
+  { // header
+    "version": 0,
+    "line_base": -2,
+    ...
+  },
+  "Line Numbers bytecode...",
+  [ // files array
+    [ "linecol for file1", "linecol for file2", ... ], // bytecode
+    [ // files metadata
+      { "name": "/path/file1.baw", "mtime":123456789, ... },
+      ...
+    ],
+    [ "concat text of file1 frags...", "concat text of file2 frags...", ],
+  ],
+])
+
+File info and texts are placed at the end close to each other (not
+interspersed by bytecode) to increase text compression ratio, if compressor is
+employed (Zip flag is set in header).
+
+So currently there are two bytecode cublanguages inside this CBOR. Simpler one
+is in text fragments - these are triplets of line, column and text fragment
+lengths. Other one, main, is like DWARF LNS bytecode.
+
+TBD how to embed attributes/nesting in main bytecode (and BAW)? e.g.
+Perl6::Export::Attrs and :input and so on
+
+TODO frags: 3 VarUInt32's inc_line, inc_col, frag_len - this is 3 bytes
+instead of one for typical 80-column one-statement line
+...sounds like early PBMFS?
 
 ===
 шаблон:
