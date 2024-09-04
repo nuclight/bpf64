@@ -1767,6 +1767,7 @@ struct bpf_proglinkinfo_v0 {	/* header is 32 bytes (4 insns) */
 };
 
 TBD platform be enterprise number as in syslog RFC ? ELF ABI byte?
+- no, char[8] better - human readable like "FreeBSD" or "portable"
 
 Name(s) of program itself are placed directly after header; immediately after
 them starts array of required static SV's of word-size entries:
@@ -1982,6 +1983,9 @@ we just try to solve ABI versioning here as in libfoo.so.6 ? in any way, how
 compatibility versions are supposed to coexist - sysctl has just one name?
 - this was because first idea was about interacting BPF "programs", with
   argc/argv (in SVs), instead of "functions"
+  - 03.09 hmm, seems that version could be returned to every symbol, not
+    just entire package (of funcs), if attributes (sub)tree is worked through
+    enough
 
     MSB                                                               LSB
        63   56 55                      29 28                         0
@@ -2022,7 +2026,7 @@ bpf64.namespace.foo.bar.baz
 bpf64.namespace.foo.bar.baz.$: "abcd efgh segment value"
 bpf64.namespace.foo.bar.baz.&: { code_struct=members version=0x123 }
 bpf64.namespace.foo.bar.baz.*attributes
-bpf64.namespace.foo.bar.baz.*attributes.input: "nh_pos, l4_off"
+bpf64.namespace.foo.bar.baz.*attributes.input: "nh_pos,l4_off"
 bpf64.namespace.foo.bar.baz.*attributes.version: 1668969726
 
     MSB                                                               LSB
@@ -2030,6 +2034,8 @@ bpf64.namespace.foo.bar.baz.*attributes.version: 1668969726
       +-------+-------+-------+-------+-------+-------+-------+-------+
       |  'a'  |4Type|   Attribute name   |     Attribute value        |
       +-------+-------+-------+-------+-------+-------+-------+-------+
+- 03.09 no, not "for type", but just first symbol in name? e.g. "$name" for
+  attribute on scalar and "&name" for attribute on code
 
 TBD not only debug section, but doc (POD) section? with hash ident of main
 prog; and place them in swappable memory instead of wired
@@ -2216,6 +2222,11 @@ BPFDBG_LNOP_set_fragment - string offset to code fragment in this column
 TBD huh, line info is not full debug, need func and variable names, and
 possibly other info which will be clear after bpf64awc export/import... or
 func names is in PKG ? only public...
+- 04.09 02:00 attaching attributes to every instruction like what variable
+  name was used here (and using several attributes at prolog, :input et. al.)
+  would allow decompilation without source text fragments... but such will
+  work for only simple mapping like BAW, won't work for higher-level languages
+  (не одобрил)
 
 TBD 02.09 seems that decompilation requirement drastically change format: DWARF
 special opcodes only increment `pc` and line, but as we have *assembly*
@@ -2255,6 +2266,22 @@ lengths. Other one, main, is like DWARF LNS bytecode.
 
 TBD how to embed attributes/nesting in main bytecode (and BAW)? e.g.
 Perl6::Export::Attrs and :input and so on
+- 03.09 ok, for :export in source it's simple, binary debug info probably will
+  also want to attach arbitrary attributes, e.g. `:label(labelname)` for
+  source line starting with `labelname:` (BTW `sed` has branch/labels with colon
+  before, not after)... however, do we need possibility of such attributes
+  on *every* statement in BAW source? or allow them just before `{` and in
+  `our` declarations?
+  - well, may be for things like comments in `parse_ipv6()` in
+    `nuc_ts_incr.baw` with original C code? but this then must be able to span
+    several bpf_insn's and is not clear if this is better than comment/POD
+    - probably not, as it is better to write more expressive language, leave
+      asm to be asm
+    - "to span" is what entire DWARF LNS about, so it's just about new
+      columns in matrix?... also reminds of SQLite record format, LOL
+      - huh, in-memory SQLite with proper indexes may be a way to implement
+	userland emulator/debugger/decompiler... may be a way of thinking (how
+	to compress such SQLite table)
 
 TODO frags: 3 VarUInt32's inc_line, inc_col, frag_len - this is 3 bytes
 instead of one for typical 80-column one-statement line
@@ -2262,6 +2289,47 @@ instead of one for typical 80-column one-statement line
 
 also DOC (POD) section? so 2 bits: 3 sources of fragment (PKG, DBG, DOC) and
 "recover by decompile", e.g. large (jump) table
+- then files header must be in it's own section, as DOC will also have
+  it's own fragments for same files
+
+DWARF4 Section 6.2:
+<<If space were not a consideration, the information provided in the .debug_line section could be
+represented as a large matrix, with one row for each instruction in the emitted object code. The
+matrix would have columns for:
+• the source file name
+• the source line number
+• the source column number
+• whether this instruction is the beginning of a source statement
+• whether this instruction is the beginning of a basic block
+• and so on
+Such a matrix, however, would be impractically large. We shrink it with two techniques. First,
+we delete from the matrix each row whose file, line, source column and discriminator
+information is identical with that of its predecessors. Any deleted row would never be the
+beginning of a source statement. Second, we design a byte-coded language for a state machine
+and store a stream of bytes in the object file instead of the matrix. This language can be much
+more compact than the matrix. When a consumer of the line number information executes, it
+must “run” the state machine to generate the matrix for each compilation unit it is interested in.
+The concept of an encoded matrix also leaves room for expansion. In the future, columns can be
+added to the matrix to encode other things that are related to individual instruction addresses.
+When the set of addresses of a compilation unit cannot be described as a single contiguous
+range, there will be a separate matrix for each contiguous subrange.
+>> -- if we'll think in SQLite terms, then "the source file name" column would
+be just REFERENCE to another table (yep, normal form!), and source fragments
+would also live in their own table, and DOC/POD section may be yet another
+table, so for extensibility we can define a way to store several tables and
+for some of them - the language like DWARF LNS to compress them.
+
+So it's opcodes would be not of concrete names, unlike LNS, but generic
+TBD now let's find a way to store tables in literals and in separate files...
+- we have uuidgen(1) and uuid(3) API, this is 16 bytes - just 2 bpf_insn's,
+  and alternative (as in git) as MD5 would be not secure enough, SHA256 is
+  much longer, and in any case hashes would require zeroing it's own place,
+  tracking changes etc. complexity - so real alternative is human readable
+  names (like ".debug_info" huh) but those won't be unique in system
+
+...seems that debug/decompile info is separate complex task, defer it for not
+this month (first publishing), so for now it should decided: how it interacts
+with other system - literals, hashes? - and affects first language (BAW)
 
 ===
 шаблон:
