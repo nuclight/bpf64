@@ -2342,7 +2342,7 @@ start, and have no additional description (it is in the file header, which
 must always present).
 
 struct bpf_file_header_v0 {	/* header is 128 bytes (16 insns) */
-    uint16_t	insn_code;	/* 0x0f0f */
+    uint16_t	len_insn_code;	/* & 0x0f0f == 0x0f0f */
     char	magic[5];	/* "BPF64" */
     uint8_t	verformat;	/* e.g. 0, low bit  */
     uint16_t	endianness;	/* 0x4321 */
@@ -2370,6 +2370,26 @@ headers - it contains section names.
 After it follow BPF_LITERAL's with those sections which are present in this
 file, always in order of secthdr[] - so missing section can be detected by
 CRC32 of some later section in real literal.
+
+0xf     128
+0x1f    256
+0x2f    384
+0x3f    512
+0x10f   2176
+0x11f   2304
+0x12f   2432
+0x13f   2560
+0x20f   4224
+0x21f   4352
+0x22f   4480
+0x23f   4608
+0x30f   6272
+0x31f   6400
+0x32f   6528
+0x33f   6656
+
+
+
 
 ===
 шаблон:
@@ -2491,3 +2511,9 @@ This allows underlying implementation of scalar to change between platforms
 and versions
 
 а загрузку в main теперь как?
+
+05.09.24 additional (to kernel packet & syscall) goals to design for:
+1) muSCTP custom compression rules decompression
+2) An alternative to https://capnproto.org/rpc.html for method calls on
+high-latency links (e.g. MQTT5-like and/or for environments when Cap’n Proto itself
+is not applicable, e.g. no direct connections)
