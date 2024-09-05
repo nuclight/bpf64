@@ -2331,6 +2331,46 @@ TBD now let's find a way to store tables in literals and in separate files...
 this month (first publishing), so for now it should decided: how it interacts
 with other system - literals, hashes? - and affects first language (BAW)
 
+This file header is always present in all BPF64 files - whether they contain
+code, or debug info, or both. It contains UUID which allows to link files
+together if they are split, and describes all sections which would be present
+in file if contained everything from the program - however, not every section
+may be present in particular file. Sections themselves are just BPF_LITERAL
+which contains CRC32 of entire literal in it's `k` field (with k=0 while
+calculating), so section contents always starts at offset 8 from literal
+start, and have no additional description (it is in the file header, which
+must always present).
+
+struct bpf_file_header_v0 {	/* header is 128 bytes (16 insns) */
+    uint16_t	insn_code;	/* 0x0f0f */
+    char	magic[5];	/* "BPF64" */
+    uint8_t	verformat;	/* e.g. 0, low bit  */
+    uint16_t	endianness;	/* 0x4321 */
+    uint8_t	numsections;	/* how many sections are in secthdr[] */
+    uint8_t	flags;
+    uint32_t	platformver;	/* min ver req, depends on platform */
+    char	platform[8];	/* e.g. "portable" or "NetBSD\0\0" */
+    uint32_t	sections_size;	/* sum of all present, so = offset to code */
+    uint32_t	entrypoint;	/* counted from code offset */
+    uint8_t	uuid[16];	/* same in all files, like BuildID */
+    bpf_insn	secthdr[10];	/* 80 bytes max */
+};
+
+Section headers are interpreted as follows:
+
+code - upper 3 bits padding, lower 13 bits - offset to section name
+jt - section type
+jf - section flags
+k - ident (CRC32) of section
+
+#define BPF_SHFLAG_ZIP	0x01	/* Section contents is compressed */
+
+Immediately after header follows strings section which is NOT included in
+headers - it contains section names.
+After it follow BPF_LITERAL's with those sections which are present in this
+file, always in order of secthdr[] - so missing section can be detected by
+CRC32 of some later section in real literal.
+
 ===
 шаблон:
     MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
