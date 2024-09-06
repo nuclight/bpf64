@@ -2336,13 +2336,15 @@ code, or debug info, or both. It contains UUID which allows to link files
 together if they are split, and describes all sections which would be present
 in file if contained everything from the program - however, not every section
 may be present in particular file. Sections themselves are just BPF_LITERAL
-which contains CRC32 of entire literal in it's `k` field (with k=0 while
-calculating), so section contents always starts at offset 8 from literal
+which contains CRC32 of entire literal in it's `k` field (with first 4 bytes
+of section header substituted to `k` while calculating - this allows producer,
+in case of collision, to change section name offset to get CRC32 value which
+remains unique), so section contents always starts at offset 8 from literal
 start, and have no additional description (it is in the file header, which
 must always present).
 
-struct bpf_file_header_v0 {	/* header is 128 bytes (16 insns) */
-    uint16_t	len_insn_code;	/* & 0x0f0f == 0x0f0f */
+struct bpf_file_header_v0 {	/* header is multiple of 128 bytes (16 insns) */
+    uint16_t	len_insn_code;	/* & 0xcfcf == 0x0f0f */
     char	magic[5];	/* "BPF64" */
     uint8_t	verformat;	/* e.g. 0, low bit  */
     uint16_t	endianness;	/* 0x4321 */
@@ -2353,43 +2355,65 @@ struct bpf_file_header_v0 {	/* header is 128 bytes (16 insns) */
     uint32_t	sections_size;	/* sum of all present, so = offset to code */
     uint32_t	entrypoint;	/* counted from code offset */
     uint8_t	uuid[16];	/* same in all files, like BuildID */
-    bpf_insn	secthdr[10];	/* 80 bytes max */
+    uint64_t	__reserved[2];	/* to 64 bytes */
+    bpf_insn	secthdr[0];	/* 7 max in tinyest header size */
+    /* char strings[0]; after */
 };
 
-Section headers are interpreted as follows:
+Space in header after `numsections` section headers array is formatted just
+like any other strings section contents (starts and ends with NUL byte), but
+it is used only inside file header - it contains section names.
 
-code - upper 3 bits padding, lower 13 bits - offset to section name
-jt - section type
-jf - section flags
-k - ident (CRC32) of section
+Section headers do not spawn another `struct` type and use `bpf_insn`'s which
+are interpreted as follows:
 
-#define BPF_SHFLAG_ZIP	0x01	/* Section contents is compressed */
+* code - upper 3 bits padding, lower 13 bits - offset to section name
+* jt - section type
+* jf - section flags
+* k - ident (CRC32) of section
 
-Immediately after header follows strings section which is NOT included in
-headers - it contains section names.
-After it follow BPF_LITERAL's with those sections which are present in this
-file, always in order of secthdr[] - so missing section can be detected by
-CRC32 of some later section in real literal.
+#define BPF64_SHFLAG_ZIP	0x01	/* Section contents is compressed */
+#define BPF64_SHFLAG_NEEDC	0x80	/* Section needed by code / loading */
+#define BPF64_SHFLAG_NEEDD1	0x40	/* Section needed by D1 */
+#define BPF64_SHFLAG_NEEDD2	0x20	/* Section needed by D2 */
 
-0xf     128
-0x1f    256
-0x2f    384
-0x3f    512
-0x10f   2176
-0x11f   2304
-0x12f   2432
-0x13f   2560
-0x20f   4224
+Immediately after header follow BPF_LITERAL's with those sections which are
+present in this file, always in order of secthdr[] - so missing section can be
+detected by CRC32 of some later section in real literal.
+
+As BPF_LITERAL short version has 0x08 bit set in BPF_MISC class allows 2 bits,
+requirement for file header to be read as literal on BOTH endianness, this
+essentially means `code & 0xcfcf == 0x0f0f` test for first two bytes of the
+file - giving a few instructions, so wrong endainnes will be found by reading
+(always available) second `bpf_insn` after first which matched magic number.
+This - after masking out `BPF_MISC|0x08` (0x0f) - gives the following
+possibilities for file header sizes:
+
+0xf     128	code == 0x0f0f
+0x1f    256	code == 0x1f0f
+0x2f    384	code == 0x2f0f
+0x3f    512	code == 0x3f0f
+0x10f   2176	code == 0x0f1f
+0x11f   2304	code == 0x1f1f
+0x12f   2432	code == 0x2f1f
+0x13f   2560	code == 0x3f1f
+0x20f   4224	and so on
 0x21f   4352
 0x22f   4480
 0x23f   4608
 0x30f   6272
 0x31f   6400
 0x32f   6528
-0x33f   6656
+0x33f   6656	code == 03f3f
 
+Segmetss (SVs) created from code's own literals described in separate section
+called "rodatas", which is array of structs, each per segment:
 
-
+struct bpf64_rodatas_entry {
+    uint64_t	literal_iofs;	/* in insns from start of code */
+    uint32_t	offset;		/* in bytes from literal start */
+    uint32_t	size;		/* in bytes of new segment */
+};
 
 ===
 шаблон:

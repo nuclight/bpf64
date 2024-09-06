@@ -1,7 +1,9 @@
 #include <bpf64std.bah>
 #include "nuc_ts_incr.bah"
 
-/* C preprocessor is used */
+/* C preprocessor is used.
+ * BAW has no it's own comments syntax, but see end of file.
+ */
 
 #define TCPOPT_TS_KIND 8  /* Timestamp option has Kind=8 */ 
 #define TCPOPT_TS_LEN 10  /* and length 10, per RFC 1323 */
@@ -22,9 +24,47 @@ CREATE_SEGMENT_FROM_STRING_LITERAL(0, forlog);/* TODO actual call in macro */
 
 goto main;	/* functions and top-level labels in same namespace */
 
-/* update counters about our work, return 1 on success and 0 on fail */
-func rec2stat(errorno)	/* one input register, R0 */
-my value;		/* and one local register, R1 */
+/*** Comments about higher-level logic in this file start with 3 '*'s */
+
+/*** Update counters about our work, return 1 on success and 0 on fail */
+func rec2stat		/* Attributes to form BPF_PROLOG: */
+	:input(errorno)	/* one input register, R0 */
+	:my(value)	/* and one local register, R1 */
+/*
+ * Braces, apart from data structures, denote code blocks which will have
+ * their own stack frame (that's why `if`/`else` use shell syntax, not {}).
+ * And every stack may - and for some, must - have so called attributes
+ * attached to it. They have syntax of colon, attribute name, and optional
+ * list in parentheses. Some (known) attributes are processed specially
+ * by `bpf64awc` and unknown are not, but in any case added to resulting
+ * binary (depending on opions) at least in form of debug information
+ * sections, and may be visible to user/admin (e.g. in sysctl).
+ *
+ * As it can be seen in example, this is generic mechanism, which in form
+ * of known attributes "input", "my" (and "out" seen in later functions)
+ * is used to form BPF_PROLOG instruction and to declare local variable
+ * names for frame (instead of separate syntax for variables, which do not
+ * exist in assembler - these are only aliases to registers).
+ *
+ * The attributes must be valid as simple identifier names (without any
+ * punctuation other than the '_' character).  They may have a parameter
+ * list appended, which is only checked for whether its parentheses
+ *  ('(',')') nest properly.
+ *
+ * Examples of valid syntax (even though the attributes are unknown):
+ *
+ *     func fnord : switch(10,foo(7,3))  :  expensive
+ *     func plugh : Ugly('\(") :Bad
+ *     func xyzzy : _5x5 { ... }
+ *
+ * Examples of invalid syntax:
+ *
+ *     func fnord : switch(10,foo(); # ()-string not balanced
+ *     func snoid : Ugly('(');       # ()-string not balanced
+ *     func xyzzy : 5x5;             # "5x5" not a valid identifier
+ *     func plugh : Y2::north;       # "Y2::north" not a simple identifier
+ *     func snurt : foo + bar;       # "+" not a colon or space
+ */
 {
 	A = 1;
 	if errorno > STAT_MAX	/* it may be 'goto', but direct 'jt' and */
@@ -40,15 +80,13 @@ ok:
 	return A;
 }
 
-/*** Comments about higher-level logic with 3 '*'s */
-
 /* parameters:
  * network header start offset - in, l4 header offset - out,
  * returns L4 protocol
  */
-func parse_ipv4(nh_pos, l4_off)
-my iphofs, data_end;
-out error printarg1;	/* no comma - aliases to same register */
+func parse_ipv4 :input(nh_pos, l4_off)
+:my(iphofs, data_end)
+:out(error printarg1)	/* no comma - aliases to same register */
 {
 	LOG1("parse_ipv4: nh_pos=%d\n", nh_pos);
 
@@ -120,10 +158,10 @@ out error printarg1;	/* no comma - aliases to same register */
  * network header start offset - in, l4 header offset from L3 - out,
  * returns L4 protocol
  */
-func parse_ipv6(nh_pos, l4_off)
-my iphofs, data_end, next_hdr_type,
-   l4_abs;	/* absolute l4_off - from start of packet */
-out error printarg1, printarg2;
+func parse_ipv6 :input(nh_pos, l4_off)
+:my(iphofs, data_end, next_hdr_type,
+   l4_abs)	/* absolute l4_off - from start of packet */
+:out(error printarg1, printarg2)
 {
 	data_end = P.len; /* load length of packet */
 
@@ -233,10 +271,11 @@ out error printarg1, printarg2;
 /* parameters:
  * network header start offset - in, l4 header offset - in
  * returns: -1 format err, 0 untouched, 1 modified */
-func process_tcp(nh_pos, l4_off optoff) /* again 2 names for second register */
-my data_end, size, optkind, optlen, /* sort registers by use - in case of */
-   old_ofs, changed, open;	    /* limited JIT (pesky x86) */
-out err printarg1, printarg2;
+func process_tcp
+:input(nh_pos, l4_off optoff) /* again 2 names for second register */
+:my(data_end, size, optkind, optlen, /* sort registers by use - in case of */
+   old_ofs, changed, open)	     /* limited JIT (pesky x86) */
+:out(err printarg1, printarg2)
 {
 	changed = 0; err = STAT_PROGER_ERROR;
 	data_end = P.len; /* load length of packet */
@@ -399,10 +438,23 @@ err_past_end:
 
 }
 
-func main()	/* TODO setup DS segment from arguments */
-my data_end, rc, h_proto, nh_off, ipproto, done;
-out err printarg1, nh_pos, l4_off;
+=head1 tcp_timestamp_incr()
+
+Increment TCP timestamp in every seen IPv4 or IPv6 packet.
+
+VLANs are supported also. Must have a segment into which statistics will
+be written, e.g. for packet with errors. It's number passed as sole
+argument in R0.
+Values for statisics array are:
+...more multiline documentation may follow here, see end of file.
+
+=cut
+
+func main :input(ds_no)	/* setup DS segment from arguments */
+:my(data_end, rc, h_proto, nh_off, ipproto, done)
+:out(err printarg1, nh_pos, l4_off)
 {
+	DS = ds_no;
 	rc = XDP_DROP;
 
 	data_end = P.len;
@@ -465,3 +517,19 @@ l3_parse:
 	A = rc;
 	return A;
 }
+=pod
+
+Plain Old Documentation:
+
+Lines which match regexp ^=[a-zA-Z] start block which is ended by a =cut
+line. This block may be added by bpf64awc to documentation section but
+otherwise is ignored. This allows to have embedded documentation pieces
+directly near described functions, which - hopefully - will encourage
+authors to write it and keep up to date (as it is easier to access).
+
+Be warned, however, that this may interfere with whatever preprocessor
+is used - it may expand macros inside your docs. Also, this is a way to
+comment something if preprocessor is not used - just put "=comment" block
+(or whatever your documentation formatter will ignore).
+
+=cut
