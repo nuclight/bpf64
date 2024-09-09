@@ -229,14 +229,33 @@ encounters, it corresponds to A register, so compatibility is preserved.
     55 |  R15 |  64  | Rotated/renamed | Local   | 
     56 |  R16 |  64  | Rotated/renamed | Local   | 
     57 |  R17 |  64  | Rotated/renamed | Local   | 
-    58 |Reserved for future use e.g. as flags & trap jump condition
-    59 |Reserved for future use
+    58 | Reserved for future use e.g. as flags & trap jump condition
+    59 | Reserved for future use
     60 |   V0 | 128+ | Special: b/vect | Global  | IPv6/strings: no ALU
     61 |   V1 | 128+ | Special: b/vect | Global  | except AND, OR, and LSH
     62 |   V2 | 128+ | Special: b/vect | Global  | or RSH in multiple of 8
     63 |   V3 | 128+ | Special: b/vect | Global  | (e.g. memmove() or like)
 ```
 
+In addition to registers above, there are also special registers like segment selectors described under `BPF_TAX`/`BPF_TXA`, and pseudoregisters, which abstracts typical RISC's zero register to strings of zeroes ond ones - that is, the main application is for CIDR masks.
+
+If register encoding takes one byte, than it is normal register if high bit is 0, otherwise it's "zero-ones 64-bit pseudo-register" described as follows:
+
+```
+      MSB      6       5       4       3       2       1       0
+    +-------+-------+-------+-------+-------+-------+-------+-------+
+    |Pseudo?|Starts |        Count of 'Starts' bit minus one        |
+    +-------+-------+-------+-------+-------+-------+-------+-------+
+```
+
+This encoding allows of up to 64 zeroes or ones filled from MSB to LSB. For example, value 0xd0 means "start from 1, 0x10+1 times, then inversion of start bit" - that is,
+0xffff800000000000.
+
+Another example, if we want to have a hostmask for /24 IPv4 network, that is, 0x000000ff, then after extending this to 64 bits we get 56 zeroes from MSB, so 0x80 + 0x37 gives us 0xb7.
+
+In the BPF64 Assembler Wrapper and also in spec, this has the following generic notation: letters OZ or ZO for "ones, then zeroes" and vice versa, then width, slash `/` and allocated bits for starting from MSB  in definite length,or `+` or `-` signs for "to infinity from left or right". Thus, CIDR netmask is written as `OZm/a` for `m` width and `a` one bits, e.g. `OZ128/48` for IPv6 /48 subnet mask.
+
+TODO generic notation encoding for longer than 64 bits
 
 ### In BPF_LD and BPF_LDX classes
 
@@ -275,5 +294,252 @@ The register number field is 5 bits and is treated if it was 6 bits with high bi
 #define	BPF_RODATA (BPF_L|BPF_IMM) // 0 1 0 0 0 regs[N] <- C[8*pc+imm:BPF_SIZE]
 ```
 
-The `BPF_L` is 
+The `BPF_L` in LD means "little-endian" if load is from packet. For
+example, on little-endian platform loading `BPF_H` requires `ntohs()` but
+`from_leH()` is no-op, on big-endian platform ordinary load do not require
+conversion (it's already network byte order), but `*_PKT_LE` modes will require.
+These modes defined only for packet access because other memory segment are
+expected to be in native machine byte order. For rare cases when this is not
+true, there is `BPF_ENDIAN` instruction in `BPF_ALU` class.
+
+`BPF_RODATA` is another use of `BPF_L` (meaning "literal" here) for generic literal, addressing mode around `pc` in code segment, see `BPF_LITERAL` instruction.
+
+If `BPF_SEG` is set, then access is not to packet `P[]` but to externally-supplied memory segment. Segments are treated like packets in a sense of checks: e.g. access past end of segment is not allowed, length of segment can be obtained by `BPF_SEG|BPF_LEN`, etc.
+
+Segments, in addition to functions, are the main way for BPF program to interact with the rest of system. Segment numbers, which may live in segment selector registers, are part of BPF program environment - like File Descriptors for Unix processes.
+
+Note that only one another index register, Y, is added - the encoding don't allow more.
+
+The `jt` field, depenging on register, segment and mode, allows additional operation types ("t" im mnemonic) - in a way defined by platform. For example, access to per-CPU data or atomic operations (always on segments, not packet) can be here, subject to check by implementation (e.g. that atomic operation do not go to per-CPU segment, etc.).
+
+### In BPF_ST and BPF_STX classes
+
+Here existing implementations check just `BPF_ST` or `BPF_STX`, that is, `BPF_IMM`
+is treated like `BPF_MEM`. However, new code need not be defined, because there
+is no point to store in 'k' of instruction - self-modifying code can't be
+verified.
+
+TBD 07.09 what if bit/byte vector strings instead? then IPv6 (128) is just
+    fixed width particular case and any strings can be used (e.g. for text
+    protocols) by special SVs, but how to load then? cur++ ? and Z() be
+    rethought to even more generic... OZm/a (e.g. OZ128/48), ZO-35 ?
+  - 07.09 SIGN/MSX bit do not match it's place with `BPF_ALU/BPF_JMP`, but we
+    don't need 6 bits here as `BPF_SIZE` tells it already, what to do? in any
+    case put a note (rationale) to spec
+    - eBPF has `is_sdiv_smod() insn->off == 1`, `is_movsx() off == 8/16/32`
+      and `BPF_MEMSX` as bit in `BPF_MODE`
+TBD
+
+TODO
+
+### In BPF_ALU class
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |   Register number N   |S??|XFk|     BPF_OP    |SRC| BPF_ALU=4 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |jt - TBD type or third register|     jf - "from" register      |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+k/imm +                                                               +
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+```
+
+Register number is of full 6 bit space, classic programs will have it zero meaning `A` register. `XFk` bit enables eXtended Format, as we can not be sure that every classic BPF code generator leaves `jt` and `jf` zeroed outside of `BPF_JMP` - existing interpeter implementations simply ignore them, so this probably may be possible.
+
+```c
+#define	BPF_ADD		0x00
+#define	BPF_SUB		0x10
+#define	BPF_MUL		0x20
+#define	BPF_DIV		0x30
+#define	BPF_OR		0x40
+#define	BPF_AND		0x50
+#define	BPF_LSH		0x60
+#define	BPF_RSH		0x70
+#define	BPF_NEG		0x80
+#define	BPF_MOD		0x90
+#define	BPF_XOR		0xa0
+/*			0xb0	reserved */
+#define	BPF_ARSH	0xc0	/* sign extending arithmetic shift right */
+#define	BPF_ENDIAN	0xd0	/* byteswap/endianness change */
+#define	BPF_SDIV	0xe0	/* signed division */
+#define	BPF_SMOD	0xf0	/* signed %= */
+```
+
+TBD two new opcodes sdiv/smod or MSX bit? `BPF_NOT` is missing, and if put it to
+0xb0 then no reserved left if sdiv/smod used
+
+TBD decide if XFk refers to `k` for third register under `BPF_X` in `BPF_SRC`, or to `jt`
+
+Note that for extended registers (e.g. 128 bit IPv6), implementation MUST support only `BPF_AND`, `BPF_OR` and `BPF_LSH`/`BPF_RSH` in multiple of 8 (e.g. `memmove()` could be used byte-wise). However implementation MAY support long arithmetics on them if wish so.
+
+TODO
+
+### In BPF_JMP class
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |   Register number N   |S??|XFk|     BPF_OP    |SRC| BPF_JMP=5 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |               jt              |               jf              |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+k/imm +                                                               +
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+```
+
+This class, as in classic BPF, retains forward jumps only, and, given that `jt` and `jf` fields are present, for possibility for future opcode extensions only "greater" opcodes are used, in contrast to eBPF (eBPF changed `jt` and `jf` to single 16 bit `off` field so need to have inverted tests, but we don't need to - `BPF_JA` still available). However, signed versions of those are added as 0x60 and 0x70 (same as in eBPF). 
+
+```
+				// SRC = BPF_K or BPF_X
+#define	BPF_JA		0x00	// pc += k
+#define	BPF_JEQ		0x10	// pc += (A == SRC) ? jt : jf
+#define	BPF_JGT		0x20	// pc += (A > SRC) ? jt : jf
+#define	BPF_JGE		0x30	// pc += (A >= SRC) ? jt : jf
+#define	BPF_JSET	0x40	// pc += (A & SRC) ? jt : jf
+#define BPF_JTABLE	0x50	/* in literal, like TBB in ARM */
+#define BPF_JSGT	0x60	/* SGT is signed '>', GT in x86 */
+#define BPF_JSGE	0x70	/* SGE is signed '>=', GE in x86 */
+/*			0x80	reserved */
+/*			0x90	reserved */
+/*			0xa0	reserved */
+/*			0xb0	reserved */
+/*			0xc0	reserved */
+/*			0xd0	reserved */
+#define BPF_JEXT	0xe0	/* extended operation in BPF_JMPMODE */
+/*			0xf0	reserved */
+```
+
+If `XFk` bit is set, then (see ALU) instead of `BPF_X` the second register is encoded in `k`
+
+TBD what is more priority, e.g. `BPF_K` and `XFk` ?
+
+TBD encoding for `k` for strings longer 64 bits
+
+### In BPF_RET class
+
+Opcodes in this class are altering control flow graph program in a
+possibly non-forward way - e.g. `BPF_JMP` allows only forward jumps, but `BPF_RET`
+allows to jump backwards or even terminate current program.
+
+#### BPF_EXIT (0)
+
+The first is `BPF_EXIT`, the only instruction in this class in classic BPF.
+It returns from current function or entire program, yielding return value in
+register `A` for caller, if it was a procedure. Here for `BPF_RVAL` allowed values
+are `BPF_A`, `BPF_K` and `BPF_X`. If more parameters were needed by calling
+procedure, they are passed in input section of rotated registers.
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |      Return code (class)      |BPF_EXIT=0 | _RVAL | BPF_RET=6 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      | jt: return to this level      |               jf              |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+k/imm +                  Return value, if BPF_K                       +
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+```
+
+If a return was to previous function in the stack, register window is
+automatically restored as it was in previous function.
+
+The most important new thing here is return code (class), used for exception handling ad altering control flow in caller. By default it's zero, `BPF_OK`, meaning just normal return - caller gets return value in `A` register. The following codes are processed by system, and others are also possible.
+
+```
+#define BPF_OK      0
+#define BPF_NEXT    1   /* 'continue'*/
+#define BPF_LAST    2   /* 'break' */
+#define BPF_RETURN  3   /* 'return' */
+#define BPF_ERROR   4   /* 'die' */
+```
+
+These can be described, for caller, behaviour, as if in caller's code, instead of our procedure call, were written another statement: `continue`, `break`, `return` or exception was thrown. The primary use is for loop and exception handling, but cooperating BPF programs may implement their own control structures with this - which may be useful for higher-level languages (e.g. firewall description rules) which are compiled to BPF64.
+
+See example later in how `BPF_LOOP` can be optimized.
+
+#### BPF_CALL (1)
+
+Call a function. Backward address is allowed. Return address is placed in
+shadow (back) stack. From the register window point of view, call is two-part
+process - first, calling procedure advances window, hiding it's own input and
+local registers from callee. Then, simple callee may choose to not do anything
+at all, but if callee plans to call another functions, the rest of window must
+be set up with `BPF_PROLOG` instruction.
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |RegWindow shift| 0/BPF_L/BPF_S |BPF_CALL=1 | _RVAL | BPF_RET=6 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |               jt              |               jf              |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+  imm +       Address of called function relative to pc, signed       +
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+```
+
+If there are too many frames - that is, (back)stack overflow - fatal exception is thrown and execution of this BPF machine is stopped. This is one of mechanisms of protecting instead of complex eBPF verifier - endless calling backwards will overflow stack.
+
+TODO different calling conventions - to function by pc+imm if 0, to BPF
+machine if `BPF_L` and external kernel functiond when SV/segment-wrapped,
+also think about simple `k` resolving like in NetBSD `bpf_ctx_t` and with
+run-time (may be each call) resolving by ASCII name; SV/segment-wrapped
+means arguments are *not* in registers so they must be prepared before
+call in some temporary space - Dtrace's `pushtr`/`pushtv`? Perl's `ST(n)` ?
+
+TODO jt != 0 & jf != 0 - it's `catch` (pairs like 'error => labelname' in awc)
+
+TBD or not in `call`? where to capture other [trappable] exceptions?
+
+#### BPF_PROLOG (2)
+
+  Usually the first instruction of called function. Advances register window,
+  declaring how many input, local and output registers will be used.
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | Reserved  | # of private regs | BPF_ROLOG = 2 |SRC| BPF_RET=6 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      | Reserved  | jt: # of out regs | Reserved  |jf: # of input regs|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+k/imm +                            Reserved                           +
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+```
+
+Caller reserves it's output registers number to maximum of any called function can accept. Thus every called function must declare how many it has input registers actually - and reserves rest of space for both local and it's own output registers. Then, when it's time to do it's own call, it knows how many local registers it has and advances window by this number in `BPF_CALL`.
+
+Limiting output registers is two-purpose: to not overdo zero initialization of those registers on call (and most importantly, in JIT with limited registers to leave them in backing memory) and to check for errors - an exception will be thrown on access to register after declared.
+
+TBD
+
+#### BPF_LOOP (3)
+
+
+
+
+
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |   Register number N   |S??|XFk|     BPF_OP    |SRC| BPF_JMP=5 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |               jt              |               jf              |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+k/imm +                                                               +
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+```
 
