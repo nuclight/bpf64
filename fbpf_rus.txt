@@ -1,3 +1,7 @@
+! This file/gist was reflecting thinking/design process (in mix of English &
+! Russian) and is now in HISTORIC status - selected variants are moved to
+! http://github.com/nuclight/bpf64/bpf64spec.md (see there for actual version)
+
 04.07.24 14:09:03
 возникла идея, как можно расширить классический BPF без верификатора - всё равно в нашем BSD-коде он ходит в mbuf, а в eBPF по факту нужны проверки указателя на каждый чих, поэтому оставить доступ к пакету как и было, добавить BPF_CALL и BPF_RET, stack frame на 16 слов по 64 бита, среди них read only Loop Counter для BPF_LOOP, который только декрементит счетчик и единственный разрешенный jump назад - все остальные только вперёд; ну еще BPF_SYSCALL добавить для внешних функций, подумать насчёт дополнительных областей памяти и деталей реализации BPF_LOOP (да, только один nested на функцию, но break/continue/jump изнутри что делать?), а также exception handlers (за пределы пакета, stack overflow и т.д.) - и всё, сложный верификатор не нужен, программа гарантировано завершится и имеет доступ только к разрешенным областям памяти. А поскольку это виртуальная машина, то JIT тоже имеет доступ только туда
 ===
