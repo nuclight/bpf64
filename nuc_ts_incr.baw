@@ -84,8 +84,7 @@ ok:
  * network header start offset - in, l4 header offset - out,
  * returns L4 protocol
  */
-func parse_ipv4 :input(nh_pos, l4_off)
-:my(iphofs, data_end)
+func parse_ipv4 :input(nh_pos, l4_off) :my(iphofs, data_end)
 :out(error printarg1)	/* no comma - aliases to same register */
 {
 	LOG1("parse_ipv4: nh_pos=%d\n", nh_pos);
@@ -272,9 +271,9 @@ func parse_ipv6 :input(nh_pos, l4_off)
  * network header start offset - in, l4 header offset - in
  * returns: -1 format err, 0 untouched, 1 modified */
 func process_tcp
-:input(nh_pos, l4_off optoff) /* again 2 names for second register */
-:my(data_end, size, optkind, optlen, /* sort registers by use - in case of */
-   old_ofs, changed, open)	     /* limited JIT (pesky x86) */
+:input(nh_pos, l4_off optoff)	/* again 2 names for second register */
+:my(data_end, size, cur,	/* sort registers by use - in case of */
+   old_ofs, changed, open)	/* limited JIT (pesky x86) */
 :out(err printarg1, printarg2)
 {
 	changed = 0; err = STAT_PROGER_ERROR;
@@ -331,11 +330,46 @@ func process_tcp
 	alias D sum; 	/* this var lives in global 32-bit register */
 	alias E old; /* XXX explicit type for unsigned short? */
 
-	/*
-	 * Loop is allowed to be initialized from register, but will still
-	 * decrement towards zero.
-	 */
-	loop I=size {
+/*
+ * Loop is allowed to be initialized from register, but will still
+ * decrement towards zero.
+ *
+ * Remember loop body is a stack frame. Thus it can have it's own
+ * variables (attributes attached). Note that this is NOT a good code for
+ * this particular function (it has to be more or less close to corresponding
+ * XDP .c example) - having another 2 variables in outer scope would be more
+ * simple. But to demonstrate possibility...
+ *
+ * Here is register window state of `process_tcp` function:
+ *
+ * R0     R1     R2       R3   R4  R5      R6      R7   R8  R9
+ * nh_pos l4_off data_end size cur old_ofs changed open err printarg2
+ *        optoff                                        printarg1
+ *
+ * -----> shift 1 register
+ *
+ *        R0     R1       R2   R3  R4      R5      R6   R7      R8     R9  R10
+ *        optoff data_end size cur old_ofs changed open optkind optlen err ...
+ *
+ * ..and this is how it looks in our loop stack frame ^^^ - in this layout, we
+ * saved just one register, in compare to if optkind & optlen were R8 & R9 in
+ * function and printarg2 was in R11 (now it's R9 and R10 in loop).
+ *
+ * To achieve this, we declare attributes to loop body, just like as if it was
+ * a function, repeating variable names we'll reuse from parent in :input
+ * (alas, assembler do not have closures, so you have to it manually) and
+ * specifying attribute with amount of register window shift - instead of usual
+ * "number of input registers + number of private local registers".
+ *
+ * This technique is probably more useful when registers assigned so that
+ * callee need just tail of your local registers, e.g. in `catch {}` blocks.
+ */
+	loop I=size
+	    :regshift(1)
+	    :input(optoff, data_end, size, cur, old_ofs, changed, open)
+	    :my(optkind, optlen)
+	    :out(err printarg1, printarg2)
+	 {
 		LOG("while {");
 
 		open = 261;	/* just marker to be in disasm */
@@ -419,8 +453,8 @@ func process_tcp
 		sum = old + C;
 		F = P[tcph.cksum];
 		sum += F;
-		G = sum & 0xffff; H = sum>>16;
-		sum = G + H;
+		A = sum & 0xffff; B = sum>>16;
+		sum = A + B;
 		LOG1("changing cksum to htons(%x)\n", sum);
 		P[tcph.cksum] = sum; /* XXX again bpf_htons(sum + (sum>>16)) ? */
 		

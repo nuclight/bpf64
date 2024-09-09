@@ -479,6 +479,20 @@ TBD this is 5 bits for register, loop counters are prohibited to LD - use
 and address - for mem use M[k] & M[k+1] ? in which order?
 - what to do in BPF_ST? do we allow saving loop registers, IPv6 to pkt?
 - use 2 instrs in LDX/STX for M[k] in 128: hi and lo
+- 06.09.24 treat this 5 bits as 6 with upper set (see this day in ALU), M[]
+  will be treated as "bytes" for extended registers, and we don't need to
+  refer to 32 bit registers here - there's sign extend bit if loading B/H/W;
+  rethink Z() to MASK() counting from right extending to infinity - for future
+  registers wider than 128 bits
+  - 07.09 what if bit/byte vector strings instead? then IPv6 (128) is just
+    fixed width particular case and any strings can be used (e.g. for text
+    protocols) by special SVs, but how to load then? cur++ ? and Z() be
+    rethought to even more generic... OZm/a (e.g. OZ128/48), ZO-35 ?
+  - 07.09 SIGN/MSX bit do not match it's place with BPF_ALU/BPF_JMP, but we
+    don't need 6 bits here as BPF_SIZE tells it already, what to do? in ane
+    case put a note (rationale) to spec
+    - eBPF has `is_sdiv_smod() insn->off == 1`, `is_movsx() off == 8/16/32`
+      and BPF_MEMSX as bit in BPF_MODE 
 
 TBD which mode for loading address to KERN, and which for types to KERN?
 - what if both at the same time? possible if it's k/imm only; so impl
@@ -494,6 +508,10 @@ with zero value "no such special things", and `jf` just segment number
     - however, ipfw tables are external to bpf64, they are not in sysctl
     - well, generic %map can include type and accessor funcs ("tied HV"), so
       code from ipfw tables could be reused to be independent space in sysctl
+- 07.09 for extended (IPv6/string) registers, `jt` may be load offset, see
+  also this day for SIGN/MSX problem, may be also here - name it as `Type`?
+  universal name, as atomicity is also type, and atomicity can't be for
+  extended registers as they are more than native word size
 
 TBD naming: global? extern?
 
@@ -515,7 +533,7 @@ TBD
 
     MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
- code | Register number N |MSX|WID| Y |     BPF_OP    |SRC| BPF_ALU=4 |
+ code | Register number N |MSX|WID|XFK|     BPF_OP    |SRC| BPF_ALU=4 |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
   off |      jt - "to" register       |     jf - "from" register      |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
@@ -551,6 +569,12 @@ BPF_STMT macro sets them to 0, tcpdump also emits 0, but what if
 non-conformant compilers exist?..
 
 or do 'jt' as 'third' ? e.g. X, Y, or CIDR with counts of 1's and 0's in k
+- 06.09.24 yes, third: the register in `code` is always lvalue (left to `=`)
+  - 07.09 well, what if BPF_K ? may be unify with BPF_JMP variant 2 ?
+    - and when "k is just k" also, use BPF_SIGN to extend k to 64 bits, so now
+      sign bit is not for ARSH/SDIV/SMOD only, but more broad
+    - so `jt` is now reserved and MUST be 0 for future extensions, and R() and
+      Z() encodings may use full 32 bits of `k`
 
 `Z(k)` means "zero-ones pseudo-register" described as follows - take low byte
 of `k` and interpret it as:
@@ -649,6 +673,10 @@ available, width from table below is used.
 
 TBD more index registers? shadow / bank switching registers? scalar selector register?
 - no bank-switching, there's BPF_MEM for it
+
+TBD 06.09.24 VL0.., BPF_B for 64 bit; X & Y to 26/27;
+5 selectors - last (F) reserved;
+just 6 bit var instead of WID in ALU?
 
 TBD
 
@@ -752,6 +780,10 @@ TBD do we really need 16-bit offset insead of jt/jf given 32-bit BPF_JA ?
 in eBPF it's needed because backward jumps are allowed (and they can't use
 `imm` there), but we have them only for loops - which may be rethought,
 and restoring jt/jf allows to free more opcodes in BPF_JMP again
+
+TBD 07.09 see ALU: Rk rename to XFk, no OFF, SIGN bit instead
+- or no sign bit: adding just BPF_JSGT and BPF_JSGE is not such waste as '<'
+  and '<=' and their signed versions
 
 TBD
 
@@ -1041,6 +1073,13 @@ TBD let's try how this look in code...
 
 TBD ok, it's single instruction now, then why 3 states? they are now impossible?
 
+TBD 07.09 what if we'll have more registers, and even if not, it's better for
+JITs to know which registers are local, so need decoupling local+out thus:
+1) space for it in backstack frame (at least 5 bits for each possible in 16)
+2) in BPF_LOOP/BPF_RET optimization above, probably decouple BPF_PROLOG from
+   BPF_LOOP (too little space in upper `code` + `jf`) - e.g. check by seen
+   flag in body? or check `jt` points to BPF_PROLOG ?
+
 
 TBD 31.08.24 if verifier is simple, but having killed by timeout is too ugly for solution, may be statistical approach: if program consumed too much time on a first few launches, mark it as bad?
 
@@ -1196,6 +1235,8 @@ This way, it is possible to add more registers in the future, e.g. 128-bit
 registers for IPv6 addresses - while only four of them will be available for
 direct use in ALU/JMP/LD commands, it will be possible to have more fast
 registers in hardware for storage than to reload from slower (host) memory.
+
+TBD 06.09 do we need number spaces? see this day in ALU et al.
 
 
 Extended length instructions:
