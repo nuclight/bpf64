@@ -156,6 +156,22 @@ k/imm +                                                               +
 
 As C macro names in code are typically ORed together forming too long line (ususal coding convention is 80 chars max per line), they are continued to be called as short as possible, even if it is wrong grammar etc.
 
+### Packages
+
+Aforementioned `Foo::Bar::baz()` may look like following if implemented via `sysctl`:
+
+```
+bpf64.namespace.foo.bar
+bpf64.namespace.foo.bar.baz
+bpf64.namespace.foo.bar.baz.$: "abcd efgh segment value"
+bpf64.namespace.foo.bar.baz.&: { code_struct=members version=0x123 }
+bpf64.namespace.foo.bar.baz.*attributes
+bpf64.namespace.foo.bar.baz.*attributes.input: "nh_pos,l4_off"
+bpf64.namespace.foo.bar.baz.*attributes.version: 1668969726
+```
+
+TODO
+
 ## Changes to classic BPF
 
 There are no directly available backward jumps in BPF64 - they are possible only via calling to new stack frames. Thus the `bpf_insn` structure is reused as is, with exception that `k` field may be sometimes be used as signed, in which case it is called `imm`.
@@ -679,7 +695,7 @@ JITs to know which registers are local, so need decoupling local+out thus:
 
 Here as it was in classic BPF:
 
-```
+```c
 #define	BPF_TAX		0x00
 /*			0x08	reserved */
 /*			0x10	reserved */
@@ -1258,6 +1274,9 @@ offsets mey require specific sorting).
 
 ### The "impex" Section
 
+Imports and exports. This is just array of `uint64_t` with "instructions" for a simple `switch/case` - what to do and with what. Command `{` is like `cd namespace` and `}` is like `cd ..` which achieves cheap compression of repeated (in "Foo::Bar...", "Foo::Baz...") substrings (and more performance-friendly for implementations like `sysctl`).
+
+First there is export section. Starts with empty namespace, so on corresponding `}` it is known that exports are ended and now imports start. The order is such because import may refer to something we just exported - e.g. absolute `k` function number instead of relative-to-`pc`.
 
     MSB                                                               LSB
        63   56 55                      29 28                         0
@@ -1288,4 +1307,25 @@ offsets mey require specific sorting).
       +-------+-------+-------+-------+-------+-------+-------+-------+
       |  'v'  |                    Version                            |
       +-------+-------+-------+-------+-------+-------+-------+-------+
+    MSB                                                               LSB
 
+       63   56 55 53 52                29 28                         0
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+      |  'a'  |4Type|   Attribute name   |     Attribute value        |
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+- TBD 03.09 no, not "for type", but just first symbol in name? e.g. "$name" for
+  attribute on scalar and "&name" for attribute on code? 28-29 bits to 32 by string section number?
+
+TODO Version Strings
+
+TODO copy needed more from .txt
+
+### The Debug Section(s)
+
+TODO
+
+### The Plain Old Documentation Section
+
+## The BPF64 Assembler Wrapper language
+
+TBD be it here or separate document?
