@@ -3,7 +3,7 @@
 
     * * * DRAFT * * *
 
-# BPF64: platform-independent hardware-friendly eBPF alternative
+# BPF64: platform-independent hardware-friendly backwards-compatible eBPF alternative
 
 ## Intro
 
@@ -803,9 +803,9 @@ Long form contain 16 more bits, using codes from 0xe0 to 0xf8:
 
 This gives 26 bits of `bpf_insn`'s, or 2^29 bytes. This is 512 Mb, such a bitmap can cover entire IPv4 space.
 
-### Undecided if needed: BPF_PACKED
+### To Be Determined if needed: BPF_PACKED
 
-This is in spirit of ARM Thumb, MIPS16e/microMIPS or RV16E etc. compressed instruction sets. This section is provided in this spec temporarily - jump literals should be moved in their class, and for IPv6 it is unclear if it provides any benefits. If used, it will use 7 lengths from 0x88 to 0xd8(not as in copypaste below). In any case, a copy text here as it was in early stages:
+This is in spirit of ARM Thumb, MIPS16e/microMIPS or RV16E etc. compressed instruction sets. This section is provided in this spec temporarily - jump literals should be moved in their class, and for IPv6 it is unclear if it provides any benefits. If used, it will use 7 lengths from 0x88 to 0xd8 (not as in copypaste below). In any case, a copy text here as it was in early stages:
 
 ```
 <<Because (like Thumb-1 and MIPS16) the compressed instructions are simply
@@ -1119,25 +1119,17 @@ struct bpf_backstack_frame {
 #define BPF_MAX_BACKSTACK	32
 #define BPF_MAX_REGWINDOW	264
 
-/* typed args, e.g. for printf(), 256 bytes */
-struct bpf_argv {
-	uint8_t		argc;		/* # args, 0..15 */
-	uint8_t		argtypes[15];	/* their types as in bpf_sv */
-	bpf_sv_union_t	argvalues[15];	/* and actual values like in bpf_sv */
-};
-
 /* Entire "process" and "CPU" memory - fit on 4 Kb page */
 struct bpf_process_mem {
 	STAILQ_ENTRY ...		/* XXX other housekeeping */
 	uint64_t	start_tick;	/* do we run too much? base for bsp */
-	struct bpf_insn *kreg_pc;	/* pc when KERN register written */
-	uint16_t	ds, es;		/* segment selector registers */
+	uint16_t	as, bs, cs, ds, es; /* segment selector registers */
 	uint32_t	X, Y;		/* index registers */
 	uint8_t		bsp;		/* backstack pointer */
-	uint8_t		kreg_flags;	/* KERN reg locked? */
+	uint8_t		flags;		/* TBD */
 	uint8_t		__align[26];	/* to 64 bytes from beginning */
 	uint64_t	g_regs[8];	/* A..H (64 bytes) */
-	struct in6_addr Z[4];		/* 128-bit registers (64 bytes) */
+	struct in6_addr V[4];		/* 128-bit registers (64 bytes) */
 	struct bpf_backstack_frame backstack[BPF_MAX_BACKSTACK]; /* 768 bytes */
 	uint64_t	reg_window[BPF_MAX_REGWINDOW];	/* 2112 bytes */
 	uint64_t	mem[BPF_MAX_MEMWORDS];	/* 1024 bytes * */
