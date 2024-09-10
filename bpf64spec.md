@@ -162,7 +162,7 @@ There are no directly available backward jumps in BPF64 - they are possible only
 
 Memory addressing extended beyond the `P[]` packet to a number of *segments*, up to 2^32 bytes in size, each having it's type, permissions etc.
 
-## Registers
+### Registers
 
 The general-purpose registers encoding is so that when older program is
 encounters, it corresponds to A register, so compatibility is preserved.
@@ -394,7 +394,7 @@ k/imm +                                                               +
 
 This class, as in classic BPF, retains forward jumps only, and, given that `jt` and `jf` fields are present, for possibility for future opcode extensions only "greater" opcodes are used, in contrast to eBPF (eBPF changed `jt` and `jf` to single 16 bit `off` field so need to have inverted tests, but we don't need to - `BPF_JA` still available). However, signed versions of those are added as 0x60 and 0x70 (same as in eBPF). 
 
-```
+```c
 				// SRC = BPF_K or BPF_X
 #define	BPF_JA		0x00	// pc += k
 #define	BPF_JEQ		0x10	// pc += (A == SRC) ? jt : jf
@@ -419,6 +419,8 @@ If `XFk` bit is set, then (see ALU) instead of `BPF_X` the second register is en
 TBD what is more priority, e.g. `BPF_K` and `XFk` ?
 
 TBD encoding for `k` for strings longer 64 bits
+
+### TODO BPF_JUMPTABLE, JEXT etc. with literals, see in BPF_PACKED
 
 ### In BPF_RET class
 
@@ -452,7 +454,7 @@ automatically restored as it was in previous function.
 
 The most important new thing here is return code (class), used for exception handling ad altering control flow in caller. By default it's zero, `BPF_OK`, meaning just normal return - caller gets return value in `A` register. The following codes are processed by system, and others are also possible.
 
-```
+```c
 #define BPF_OK      0
 #define BPF_NEXT    1   /* 'continue'*/
 #define BPF_LAST    2   /* 'break' */
@@ -462,7 +464,7 @@ The most important new thing here is return code (class), used for exception han
 
 These can be described, for caller, behaviour, as if in caller's code, instead of our procedure call, were written another statement: `continue`, `break`, `return` or exception was thrown. The primary use is for loop and exception handling, but cooperating BPF programs may implement their own control structures with this - which may be useful for higher-level languages (e.g. firewall description rules) which are compiled to BPF64.
 
-See example later in how `BPF_LOOP` can be optimized.
+See example later in how `BPF_LOOP` can be optimized, and how return code is used.
 
 #### BPF_CALL (1)
 
@@ -476,7 +478,7 @@ be set up with `BPF_PROLOG` instruction.
 ```
     MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
- code |RegWindow shift| 0/BPF_L/BPF_S |BPF_CALL=1 | _RVAL | BPF_RET=6 |
+ code |  RegWindow shift  |0/BPF_L/SEG|BPF_CALL=1 | _RVAL | BPF_RET=6 |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
       |               jt              |               jf              |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
@@ -498,6 +500,25 @@ call in some temporary space - Dtrace's `pushtr`/`pushtv`? Perl's `ST(n)` ?
 TODO jt != 0 & jf != 0 - it's `catch` (pairs like 'error => labelname' in awc)
 
 TBD or not in `call`? where to capture other [trappable] exceptions?
+
+TBD about `BPF_TAILCALL` flag:
+
+`#define BPF_TAILCALL 0x400`
+
+  Like `execve()` - replaces current running BPF program with another one. The
+  stack is rewinded - current output registers become input registers at
+  offset 0, all loops are reset. All other registers are reset, except A.
+  The retained resources consist only of A and input (former output)
+  registers as "argv", current packet and memory segments and first
+  `jt` (default `BPF_MEMWORDS`) of scratch memory as "environment".
+  Everything other is cleared, just like if new program was loaded fresh.
+
+  The platform-dependent identificator of new program is in `k` or `X`. The
+  instruction does not return if load was successful, otherwise execution is
+  continued from next instruction with A set to error number (so that program
+  could e.g. deny or accept packet).
+
+TBD
 
 #### BPF_PROLOG (2)
 
@@ -525,15 +546,183 @@ TBD
 
 #### BPF_LOOP (3)
 
-
-
-
-
+Language with no backward jumps, such as classic BPF, is severely restricted for practical purposes. Adding them provides pain with program verification. But if we try to classify for what backward jumps are needed, we'll find, in addition to function calls, that such need is looping. So `BPF_LOOP` provides exactly this - looping controlled by execution environment. All loops start from some value and repeating until loop counter variable reaches zero, decrementing it on each pass for 1 (or more) - this way loop is guaranteed to terminate.
 
 ```
     MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
- code |   Register number N   |S??|XFk|     BPF_OP    |SRC| BPF_JMP=5 |
+ code |  RegWindow shift  |   Flags   |BPF_LOOP=3 | _RVAL | BPF_RET=6 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |               jt              |               jf              |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+  k   +             Initial loop counter value, unsigned              +
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+```
+
+Actually, `BPF_LOOP` is a call: loop body is executed in it's own stack frame. Current - where the `BPF_LOOP` opcode is - stack frame contains flag and value of loop counter variable. Loop body's stack frame accessed counter as `LC0` in parent frame, as `LC` in parent of parent frame, and so on up to `LC3`, giving up to four nested loops. Typical loop control constructs like `break` or `continue` are all handled with `BPF_EXIT` with corresponding return code (class) - allowing loop body even to adjust loop counter for more than 1, which is read only by normal means.
+
+`jt` is interpreted like in `BPF_JMP` class: it is offset to loop body. Loop counter variable is initialized according to `BPF_RVAL`: from `BPF_A`, `BPF_X` or `k` if `BPF_K`. While format allows full 32 bits for counter, implementations will likely want to restrict maximum number of loop iterations to much lower values, e.g. 16 bits or even MTU of the link (typically 1500).
+
+TBD doWhile in Flags? or make `jt` signed so first body before loop is always executed?
+
+While calling each iteration may seem as too much overhead, it is possible to optimize stack manipulation. The following sketch of C code (not a full production code) should give an idea how loop processing should work (see data structures in a later section):
+
+```c
+#define RETURN(x) if (caller_arg!=NULL) *caller_arg=retcode; return (x);
+#define DIE ... //similar
+	while (1) {
+		++pc;
+		switch (pc->code & 0x00ff) {
+		case BPF_RET|BPF_K:
+			A = ((u_int)pc->k);
+		case BPF_RET|BPF_A:
+			retcode = pc->code >> 8;
+			if (bsp == 0)
+				RETURN ((u_int)A);
+			pc = backstack[bsp]->ret;
+			bsp--;
+			if (pc->code == BPF_LOOP &&
+			    backstack[bsp]->flags == BPF_BSFLAG_LOOP_DESC) {
+				/*
+				 * Optimization for loop body - reuse frame.
+				 */
+				if (retcode >= BPF_RETURN) {
+					/* As if it was on this level */
+					pc = backstack[bsp]->ret;
+					bsp--;
+					/* TODO '-level' and error handling /
+				 }
+				 else {
+					/* Loop continuation. */
+					int decr = retcode == BPF_NEXT ? A : 1;
+					if (decr == 0 && retcode == BPF_NEXT)
+						DIE(INFINITE_LOOP);
+					/* Handle both do/while and next too big */
+					if (decr >= backstack[bsp]->loop_counter)
+						backstack[bsp]->loop_counter = 0;
+					else
+						backstack[bsp]->loop_counter -= decr;
+					if (retcode == BPF_LAST ||
+					    backstack[bsp]->loop_counter == 0) {
+						backstack[bsp]->flags |= BPF_BSFLAG_LOOP_DONE;
+						/* Leave bsp/counter as is */
+					} else {
+						/* Return to loop body. */
+						pc += pc->jt; // XXX signed?
+						bsp++;
+					}
+				 }
+			}
+			continue;
+        ...
+		case BPF_JMP|BPF_JA:
+			pc += pc->k;
+			continue;
+		case BPF_JMP|BPF_JGT|BPF_K:
+			pc += (A > pc->k) ? pc->jt : pc->jf;
+			continue;
+	...
+		case BPF_RET|BPF_CALL:
+			if (bsp >= BPF_MAX_BACKSTACK)
+				DIE(BACKSTACK_OVERFLOW);
+			int shft = (pc->code >> 12) + backstack[bsp]->reg_shift;
+			if (shft > 255)
+				DIE(REGSTACK_OVERFLOW);
+			bsp++;
+			backstack[bsp]->ret = pc;
+			backstack[bsp]->ctx = whatever_callee_ctx(pc);
+			backstack[bsp]->reg_shift = shft;
+			backstack[bsp]->reg_input = 0; /* XXX if no prolog? */
+			backstack[bsp]->reg_local = 0;
+			backstack[bsp]->flags = 0;
+			backstack[bsp]->loop_counter = 0;
+			... //adjust & other checks by cmd flags etc.
+			pc += (int)pc->k; // actuall get by flags
+			continue;
+	...
+		case BPF_LOOP:
+			if (bsp >= BPF_MAX_BACKSTACK)
+				DIE(BACKSTACK_OVERFLOW);
+			if (backstack[bsp]->flags == BPF_BSFLAG_LOOP_DESC)
+				DIE(LOOP_ALREADY_ACTIVE);
+			backstack[bsp]->flags = BPF_BSFLAG_LOOP_DONE;
+			backstack[bsp]->loop_counter = get_reg_or_k(pc);
+			if (backstack[bsp]->loop_counter == 0)
+				continue; // XXX do/while flag
+			backstack[bsp]->flags = BPF_BSFLAG_LOOP_DESC;
+			bsp++;
+			backstack[bsp]->ret = pc;
+			backstack[bsp]->ctx = backstack[bsp-1]->ctx;
+			// TODO prolog
+			backstack[bsp]->reg_shift = backstack[bsp-1]->reg_shift;
+			backstack[bsp]->reg_input = get_prolog_input(pc);
+			backstack[bsp]->reg_local = get_prolog_local(pc);
+			backstack[bsp]->flags = BPF_BSFLAG_PROLOGSEEN;
+			backstack[bsp]->loop_counter = 0;
+			... //adjust & other checks by cmd flags etc.
+			pc += (int)pc->jt; // XXX
+			continue;
+```
+
+TBD ok, it's single instruction now, then why 3 states? they are now impossible?
+
+TBD 07.09 what if we'll have more registers, and even if not, it's better for
+JITs to know which registers are local, so need decoupling local+out thus:
+1) space for it in backstack frame (at least 5 bits for each possible in 16)
+2) in `BPF_LOOP/BPF_RET` optimization above, probably decouple `BPF_PROLOG` from
+   `BPF_LOOP` (too little space in upper `code` + `jf`) - e.g. check by seen
+   flag in body? or check `jt` points to `BPF_PROLOG` ?
+
+### In BPF_MISC class
+
+Here as it was in classic BPF:
+
+```
+#define	BPF_TAX		0x00
+/*			0x08	reserved */
+/*			0x10	reserved */
+/*			0x18	reserved */
+#define	BPF_COP		0x20	/* NetBSD "coprocessor" extensions */
+/*			0x28	reserved */
+/*			0x30	reserved */
+/*			0x38	reserved */
+#define	BPF_COPX	0x40/* 	NetBSD "coprocessor" extensions */
+/*				also used on BSD/OS */
+/*			0x48	reserved */
+/*			0x50	reserved */
+/*			0x58	reserved */
+/*			0x60	reserved */
+/*			0x68	reserved */
+/*			0x70	reserved */
+/*			0x78	reserved */
+#define	BPF_TXA		0x80
+/*			0x88	reserved */
+/*			0x90	reserved */
+/*			0x98	reserved */
+/*			0xa0	reserved */
+/*			0xa8	reserved */
+/*			0xb0	reserved */
+/*			0xb8	reserved */
+/*			0xc0	reserved; used on BSD/OS */
+/*			0xc8	reserved */
+/*			0xd0	reserved */
+/*			0xd8	reserved */
+/*			0xe0	reserved */
+/*			0xe8	reserved */
+/*			0xf0	reserved */
+/*			0xf8	reserved */
+```
+
+We modify here two classic instructions and add `BPF_LITERAL` occupying several instruction codes.
+
+#### BPF_TAX and BPF_TXA
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | Register number N |X numspace | BPF_TAX / BPF_TXA | BPF_MISC=7|
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
       |               jt              |               jf              |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
@@ -542,4 +731,561 @@ k/imm +                                                               +
       |                                                               |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 ```
+
+If both general-purpose register and special register are zero, then this a classic BPF opcode - with `X` and `A` registers. Otherwise, it is either non-`A` 32-bit register or non-`X` register. Encoding for X numspace is:
+
+* 0 - X register
+* 1 - Y register
+* 2 - AS segment selector
+* 3 - BS segment selector
+* 4 - CS segment selector
+* 5 - DS segment selector
+* 6 - ES segment selector
+* 7 - Reserved fo future use
+
+Segment selectors have no predefined meaning, just whatever abbreviation makes sense then such a letter may be used in functions, e.g. A for "arguments", C for "current", D for "data", etc.
+
+#### BPF_LITERAL data
+
+This is not an instruction but data definition, addressable relative to `pc` instruction pointer, like in RISC processor designs (e.g. ARM). If this opcode encountered by code, it is simply skipped by it's length, as if it was `BPF_JA` unconditional jump. Validators MUST ensure that another jumps are not landing inside of `BPF_LITERAL`.
+
+It has two forms: short and long. Both form count length in `bpf_insn`'s minus one, that is, a value of 1 means there is 1 more `bpf_insn` after this head which have `BPF_MISC` and other code.
+
+Short form is contained entirely in `code` field:
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |          Low 8 bits           | 0   0 |Hi bits| 1 | BPF_MISC  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+      .                                                               .
+      .               Literal data, up to 8*N + 6 bytes               .
+      .                                                               .
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+```
+
+That is, `code` for short form always end in 0x0f, and 0x08, 0x18, 0x28 and 0x38 form two higher bits of literl's length, low bits are in higher byte of `code`, giving 10 bits for `bpf_insn`'s total, or 8 Kbyte.
+
+Long form contain 16 more bits, using codes from 0xe0 to 0xf8:
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |          Low 8 bits           | 1   1   1 |Hi bits| BPF_MISC  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |                         Middle 16 bits                        |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+      .                                                               .
+      .               Literal data, up to 8*N + 4 bytes               .
+      .                                                               .
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+```
+
+This gives 26 bits of `bpf_insn`'s, or 2^29 bytes. This is 512 Mb, such a bitmap can cover entire IPv4 space.
+
+### Undecided if needed: BPF_PACKED
+
+This is in spirit of ARM Thumb, MIPS16e/microMIPS or RV16E etc. compressed instruction sets. This section is provided in this spec temporarily - jump literals should be moved in their class, and for IPv6 it is unclear if it provides any benefits. If used, it will use 7 lengths from 0x88 to 0xd8(not as in copypaste below). In any case, a copy text here as it was in early stages:
+
+```
+<<Because (like Thumb-1 and MIPS16) the compressed instructions are simply
+alternate encodings (aliases) for a selected subset of larger instructions,
+the compression can be implemented in the assembler, and it is not essential
+for the compiler to even know about it. >>
+
+* BPF_LD128IMM:
+
+  Opcode reminds BPF_LD (0) and specifies how many to load at once, 1-3:
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   0   0   0 |Count-1|   Remaining length    |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      /                                                               /
+      \         Array of halfwords, describing pieces to load         \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+  First there are 1-3 halfwords each describing how to load pieces of
+  immediate(s) from halfwords, hereafter in which command called hextets,
+  which form final value in register(s). Each description halfword looks like:
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | Hextets Seq 1 | Hextets Seq 2 | Hextets Seq 3 |PadSkip|Registr|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+	              '               '
+        .___________./                \_______________________,
+       /                                                       \
+       +-------------+-------------+-------------+-------------+
+       |Increment hextet offset in |  Load this number of      |
+       |register by this number    |  hextets from stream      |
+       +-------------+-------------+-------------+-------------+
+
+  Offset is also incremented after putting hextets from stream, by their number.
+  So, in other words, first two bits in each sequence mean "load this number
+  of zero hextets".
+
+  Four examples of instructions where only one address is loaded into register 2.
+
+  Example 1. An address with 3 zero hextets is loaded by length 2 instruction
+  (16 bytes total).
+
+  Hextet offset       0    4    5    6    7
+  IPv6 address 1   fe80::1ff:fe23:4567:890a
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   0   0   0 | 0   0 | 0   0   0   0   0   1 |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ desc |   0   |   2   |    2  |   3   |   0   |   1   |   0   | 1   0 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0xfe80 - hextet to load by seq 1               |
+    6 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0000 - hextet to load by seq 1               |
+    8 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x01ff - hextet to load by seq 2               |
+   10 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0xfe23 - hextet to load by seq 2               |
+   12 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x4567 - hextet to load by seq 2               |
+   14 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x890a - hextet to load by seq 3               |
+   16 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+
+   1) offset is not incremented (0) as there is nothing to skip, then
+      two hextets copied (2), and offset incremented by 2
+   2) offset is incremented by 2 and now becomes 4, then 3 hextets (3+1)
+      are copied, then offset is incremented by their amount
+   3) offset is 7, one last hextet is load from stream to least significant
+      hextet of register.
+
+
+  Example 2. An address with 4 zero hextets is loaded by instruction of
+  length 2 (16 bytes total).
+
+  Hextet offset     0    1    6       7
+  IPv6 address 2   64:ff9b::1.1.255.255
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   0   0   0 | 0   0 | 0   0   0   0   0   1 |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ desc |   0   |   2   |   3   |   2   |   0   |   0   |   0   | 1   0 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0064 - hextet to load by seq 1               |
+    6 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0xff9b - hextet to load by seq 1               |
+    8 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0000 - hextet to load by seq 2               |
+   10 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0101 - hextet to load by seq 2               |
+   12 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0xffff - hextet to load by seq 2               |
+   14 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                        0x0000 - padding                       |
+   16 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+
+   1) offset is not incremented (0) as there is nothing to skip, then
+      two hextets copied (2), so then offset incremented by 2
+   2) offset was 2 and is incremented by 3, becoming 5, but this is not
+      enough to skip entire zero "::" gap, so an 0x0000 hextet is present
+      in the stream, and 3 hextets are copied from stream into register,
+      after which offset is incremented by 3 (their amount)
+   3) as offset is now 8, nothing left to do, hextet sequence 3 is ignored,
+      leftover 0x0000 hextet in the stream is padding to instruction boundary
+      and also ignored.
+
+
+  Example 3. An address with all bytes being non-zero hextets is loaded by
+  instruction of length 3, padded, 24 bytes total.
+
+  Hextet offset       0   1    2   3    4    5   6    7
+  IPv6 address 3   2001:db8:85a3:8d3:1319:8a2e:370:7348
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   0   0   0 | 0   0 | 0   0   0   0   0   1 |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ desc |   0   |   3   |   0   |   3   |   0   |   2   | 1   0 | 1   0 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                        0x0000 - padding                       |
+    6 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                        0x0000 - padding                       |
+    8 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x2001 - hextet to load by seq 1               |
+   10 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0db8 - hextet to load by seq 1               |
+   12 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x85a3 - hextet to load by seq 1               |
+   14 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x08d3 - hextet to load by seq 2               |
+   16 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x1319 - hextet to load by seq 2               |
+   18 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x8a2e - hextet to load by seq 2               |
+   20 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0370 - hextet to load by seq 3               |
+   22 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x7348 - hextet to load by seq 3               |
+   24 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+
+   1) first PadSkip is processed, giving two words of padding to skip in
+      stream.
+   2) offset is not incremented (0) as there is nothing to skip, then
+      three (3) hextets are copied from stream, so then offset is
+      incremented by 3, becoming 3
+   3) offset was 3 and not incremented (0), 3 hextets are copied from stream
+      into register, offset is incremented by 3, becoming 6
+   4) finally, two (2) hextets are loaded from stream at offset 6.
+ 
+
+  Example 4. An IPv4-compatible address (on network with old clients).
+ 
+  Hextet offset    0   6   7
+  IPv6 address 2   ::8.8.8.8
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   0   0   0 | 0   0 | 0   0   0   0   0   1 |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ desc |   3   |   0   |   3   |   0   |   0   |   2   | 1   0 | 1   0 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0808 - hextet to load by seq 3               |
+    6 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                0x0808 - hextet to load by seq 3               |
+    8 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+
+   1) offset is incremented by 3 but nothing loaded from stream (0)
+   2) same, offset is incremented by 3 becoming 6, but nothing is taken
+      from stream
+   3) last (3rd) sequence add nothing (0) to offset and loads final 2
+      hextets from stream.
+
+
+Extended jumps, with multiple checks at once - opcodes remind BPF_JMP (5).
+
+* BPF_JUMP_TABLE:
+
+  Byte-version - low byte of register (unsigned) is used as index into table.
+  This may be useful for separate processing of each TLV chunk by type.
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   1   0   1 | 1   0 |   Remaining length    |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                    Jump offset at index 1                     |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                    Jump offset at index 2                     |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      /                                                               /
+      \                                                               \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                    Jump offset at index N                     |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+
+  For value 0, jump is not stored in table - it is implicitly first
+  instruction after jump table. For values greater than N, the same place is
+  used (as if no jump occured).
+
+TBD why same? just add "default not matched" after N, and it also could be
+padding (repeated) value
+
+* BPF_JUMP_RANGES:
+
+  Often occured task - check if a number belongs to one or more ranges in
+  short (16 bit) fields, e.g. ports or Ethernet protocol numbers. As
+  specifying jump offset for each pair would consume too much space, only
+  a single jump offset is provided - if register A & (0xffff) falls into any
+  interval.
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   1   0   1 | 0   1 |   Remaining length    |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |                    Jump offset if matched                     |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 0 low bound, inclusive                  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 0 high bound, inclusive                 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 1 low bound, inclusive                  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 1 high bound, inclusive                 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      /                                                               /
+      \                                                               \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                 Range N low bound, inclusive                  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range N high bound, inclusive                 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+
+  Ranges are inclusive, as both ipfw2 and tcpdump/libpcap 'portrange' do it
+  inclusive - it allows to use single numbers, e.g. '0-1023,6000,8000-8080'
+  is equivalent to '0-1023,6000-6000,8000-8080' and the latter is encoded.
+  Whenever padding is needed, the last range could be simply repeated.
+
+  A straightforward implementation fragment may look like:
+
+	for (i = cmdlen*2 - 1; !match && i>0; i--, p += 2)
+		match = (x>=p[0] && x<=p[1]);
+
+  Underlying hardware or JIT compiler may utilize whatever optimizations
+  available, of course.
+
+* BPF_JUMP_BITSET:
+
+  More space-efficient version of ranges when overall interval fits into
+  about 8100 above some base value - match is checked against a bit set in
+  a bitmap. First instruction dword looks like
+
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   1   0   1 | 0   1 |   Remaining length    |X=1| BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |                    Jump offset if matched                     |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+k/imm |           Base value of A above which to count bits           |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+         3                   2                   1
+
+   Subsequent dwords contain bytes with bits, which are checked against the
+   value, with a straightforward implementation's fragment like:
+
+	    if (A < k)
+		    break;
+	    A -= k; /* subtract base */
+	    match = (A < (cmdlen-1)*64) &&
+		( d[ 1 + (A>>5)] & (1<<(A & 0x1f)) );
+
+   so unused (padding) bits at end are just set to 0.
+```
+
+## Possible C structures & infrastructure
+
+### Machine memory
+
+Here is how possible implementation of a BPF64 "process memory" could look like. It is sized to one page, and 
+
+TODO more description
+
+TBD 31.08.24 if verifier is simple, but having killed by timeout is too ugly for solution, may be statistical approach: if program consumed too much time on a first few launches, mark it as bad?
+
+```c
+#define BPF_BSFLAG_LOOP_MASK	0x03	/* loop state bits */
+#define BPF_BSFLAG_LOOP_NONE	0	/* not started, throw on LC access */
+#define BPF_BSFLAG_LOOP_ASC	1	/* counter incrementing \ die on   */
+#define BPF_BSFLAG_LOOP_DESC	2	/* counter decrementing / new loop */
+#define BPF_BSFLAG_LOOP_DONE	3	/* finished, l.counter accessible */
+#define BPF_BSFLAG_PROLOGSEEN	0x04	/* BPF_PROLOG was issued */
+#define BPF_BSFLAG_CATCHING	0x08	/* return will be to BPF_CATCH */
+
+struct bpf_backstack_frame {
+	struct bpf_insn *ret; // XXX what for C functions?
+	bpf_ctx_t	*ctx;		/* where we live in? */
+	uint8_t		reg_shift;	/* base for input registers */
+	uint8_t		reg_input;	/* locals after reg_shift+this */
+	uint8_t		reg_local;	/* local+out: reg_shift+input */
+	uint8_t		flags;		/* is loop active & other */
+	uint16_t	start_tick;	/* profiling/kill: time entered */
+	uint16_t	loop_counter;	/* value for loop counter */
+};
+
+#define BPF_MAX_MEMWORDS	128
+#define BPF_MAX_BACKSTACK	32
+#define BPF_MAX_REGWINDOW	264
+
+/* typed args, e.g. for printf(), 256 bytes */
+struct bpf_argv {
+	uint8_t		argc;		/* # args, 0..15 */
+	uint8_t		argtypes[15];	/* their types as in bpf_sv */
+	bpf_sv_union_t	argvalues[15];	/* and actual values like in bpf_sv */
+};
+
+/* Entire "process" and "CPU" memory - fit on 4 Kb page */
+struct bpf_process_mem {
+	STAILQ_ENTRY ...		/* XXX other housekeeping */
+	uint64_t	start_tick;	/* do we run too much? base for bsp */
+	struct bpf_insn *kreg_pc;	/* pc when KERN register written */
+	uint16_t	ds, es;		/* segment selector registers */
+	uint32_t	X, Y;		/* index registers */
+	uint8_t		bsp;		/* backstack pointer */
+	uint8_t		kreg_flags;	/* KERN reg locked? */
+	uint8_t		__align[26];	/* to 64 bytes from beginning */
+	uint64_t	g_regs[8];	/* A..H (64 bytes) */
+	struct in6_addr Z[4];		/* 128-bit registers (64 bytes) */
+	struct bpf_backstack_frame backstack[BPF_MAX_BACKSTACK]; /* 768 bytes */
+	uint64_t	reg_window[BPF_MAX_REGWINDOW];	/* 2112 bytes */
+	uint64_t	mem[BPF_MAX_MEMWORDS];	/* 1024 bytes * */
+};
+```
+
+TODO `bpf_argv`, `*input_argv`, `scalar_table[]`, space for exception handlers
+
+## Loading: binary file header, packages
+
+A BPF64 program is just a BLOB, with length multiple of 8 bytes. So kernel, or network card, or whatever capable of executing, just passes it to validator and then may just execute (if test passed). But it is possible for this BLOB to begin from `BPF_LITERAL` of specified format, and then it will be somewhat like executable file header.
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code | 0   0 | 0..3  | 1   1   1   1 | 1   1 | 0..3  | 1 | BPF_MISC=7|
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+  off |              'B'              |              'P'              |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |              'F'              |              '6'              |
+   k  +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |              '4'              | Version/Format/2nd flag byte  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |                  Endianness marker = 0x1234                   |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      /                                                               /
+      \   The rest is described by format, e.g. sequence for binary   \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+Actually this will be cast to C struct once matched. But before that, as it must be possible to detect wrong endianness on which program is tried to load, first two bytes of header (and `BPF_LITERAL` short form) is done so that it will be read as `BPF_LITERAL` (and file header) on both, and then detected by endianness marker.
+
+As `BPF_LITERAL` short version has 0x08 bit set in `BPF_MISC` class allows 2 bits,
+requirement for file header to be read as literal on BOTH endianness, this
+essentially means `code & 0xcfcf == 0x0f0f` test for first two bytes of the
+file - giving a few instructions, so wrong endainnes will be found by reading
+(always available) second `bpf_insn` after first which matched magic number.
+This - after masking out `BPF_MISC|0x08` (0x0f) - gives the following
+possibilities for file header sizes:
+
+```
+0xf     128	code == 0x0f0f
+0x1f    256	code == 0x1f0f
+0x2f    384	code == 0x2f0f
+0x3f    512	code == 0x3f0f
+0x10f   2176	code == 0x0f1f
+0x11f   2304	code == 0x1f1f
+0x12f   2432	code == 0x2f1f
+0x13f   2560	code == 0x3f1f
+0x20f   4224	and so on
+0x21f   4352
+0x22f   4480
+0x23f   4608
+0x30f   6272
+0x31f   6400
+0x32f   6528
+0x33f   6656	code == 03f3f
+```
+
+This file header is always present in all BPF64 files - whether they contain
+code, or debug info, or both. It contains UUID which allows to link files
+together if they are split, and describes all sections which would be present
+in file if contained everything from the program - however, not every section
+may be present in particular file. Sections themselves are just BPF_LITERAL
+which contains CRC32 of entire literal in it's `k` field (with first 4 bytes
+of section header substituted to `k` while calculating - this allows producer,
+in case of collision, to change section name offset to get CRC32 value which
+remains unique), so section contents always starts at offset 8 from literal
+start, and have no additional description (it is in the file header, which
+must always present).
+
+```
+struct bpf_file_header_v0 {	/* header is multiple of 128 bytes (16 insns) */
+    uint16_t	len_insn_code;	/* & 0xcfcf == 0x0f0f */
+    char	magic[5];	/* "BPF64" */
+    uint8_t	verformat;	/* e.g. 0, low bit  */
+    uint16_t	endianness;	/* 0x4321 */
+    uint8_t	numsections;	/* how many sections are in secthdr[] */
+    uint8_t	flags;
+    uint32_t	platformver;	/* min ver req, depends on platform */
+    char	platform[8];	/* e.g. "portable" or "NetBSD\0\0" */
+    uint32_t	sections_size;	/* sum of all present, so = offset to code */
+    uint32_t	entrypoint;	/* counted from code offset */
+    uint8_t	uuid[16];	/* same in all files, like BuildID */
+    uint64_t	__reserved[2];	/* to 64 bytes */
+    bpf_insn	secthdr[0];	/* 7 max in tinyest header size */
+    /* char strings[0]; after */
+};
+```
+
+Space in header after `numsections` section headers array is formatted just
+like any other strings section contents (starts and ends with NUL byte), but
+it is used only inside file header - it contains section names.
+
+Section headers do not spawn another `struct` type and use `bpf_insn`'s which
+are interpreted as follows:
+
+* `code` - upper 3 bits padding, lower 13 bits - offset to section name
+* `jt` - section type
+* `jf` - section flags
+* `k` - ident (CRC32) of section
+
+```
+#define BPF64_SHFLAG_ZIP	0x01	/* Section contents is compressed */
+#define BPF64_SHFLAG_NEEDC	0x80	/* Section needed by code / loading */
+#define BPF64_SHFLAG_NEEDD1	0x40	/* Section needed by D1 */
+#define BPF64_SHFLAG_NEEDD2	0x20	/* Section needed by D2 */
+```
+
+Immediately after header follow `BPF_LITERAL`'s with those sections which are
+present in this file, always in order of `secthdr[]` - so missing section can be
+detected by CRC32 of some later section in real literal.
+
+TODO
+
+### The String Section(s)
+
+Other sections may refer to strings by offset, which are here. This section(s)
+encodes all of the strings that appear throughout the other sections.  It
+is laid out as a series of characters followed by a null terminator.
+Generally, all names are written out in ASCII, as most C compilers do not
+allow any characters to appear in identifiers outside of a subset of
+ASCII.  However, any extended characters sets should be written out as a
+series of UTF-8 bytes.
+
+The first entry in the section, at offset zero, is a single null
+terminator to reference the empty string.  Following that, each C string
+should be written out, including the null terminator.  Offsets that refer
+to something in this section should refer to the first byte which begins
+a string.  Beyond the first byte in the section being the null
+terminator, the order of strings is unimportant (however size requirement in
+offsets mey require specific sorting).
+
+### The "impex" Section
+
+
+    MSB                                                               LSB
+       63   56 55                      29 28                         0
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+      |  '{'  |                          |       Namespace name       |
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+
+    MSB                                                               LSB
+       63   56 55                   32 31                            0
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+      |  '&'  |    Function name      |        Entry point / k        |
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+
+    MSB                                                               LSB
+       63   56 55                   32 31                    8 7     0
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+      |  '$'  |   Segment (SV) name   |    Type (fmt) name    |N/Ctltp|
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+
+    MSB                                                               LSB
+       63   56 55                      29 28                         0
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+      |  'd'  |Platform: label / API ver |       Description          |
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+
+    MSB                                                               LSB
+       63   56 55                                                    0
+      +-------+-------+-------+-------+-------+-------+-------+-------+
+      |  'v'  |                    Version                            |
+      +-------+-------+-------+-------+-------+-------+-------+-------+
 
