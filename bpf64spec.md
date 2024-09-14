@@ -253,6 +253,11 @@ encounters, it corresponds to A register, so compatibility is preserved.
     63 |   V3 | 128+ | Special: b/vect | Global  | (e.g. memmove() or like)
 ```
 
+FIXME seems that JIT on RISC-V (and MIPS different names but same count) must use x0-x8 for it's own needs, which leave us only 23 available registers... including X and Y ?.. //mainly yes but smth wrong
+- 13.09.24 RISC-V leaves 26 registers to JIT including it's own temporaries, MIPS even one less if in userspace, x86 need 1 temporary for "memory-memory", and there too many architectures, e.g. Intel APX raises number of registers. So what will be in ten years? Someone will do 64 registers? So let's move to maximum registers possible by encoding and put JIT authors do deal with that - e.g. AMD64 ABI already uses "some in registers, some in memory" to speed up at least something
+- 14.09.24 this requires for JIT implementation to know which registers is input/local/output, so it's either return to fixed register windows (as in SPARC) or somewhat like annotating each instruction which register is which
+   - probably for first version for simplicity is enough "let JIT use R0..as much as it can" without dividing to classes, but supplement `BPF_PROLOG` with a version which will be `NOP` for bytecode interpreter (and to capable JIT) but hint to limited JIT of which registers may be unused
+
 In addition to registers above, there are also special registers like segment selectors described under `BPF_TAX`/`BPF_TXA`, and pseudoregisters, which abstracts typical RISC's zero register to strings of zeroes ond ones - that is, the main application is for CIDR masks.
 
 If register encoding takes one byte, than it is normal register if high bit is 0, otherwise it's "zero-ones 64-bit pseudo-register" described as follows:
@@ -272,6 +277,10 @@ Another example, if we want to have a hostmask for /24 IPv4 network, that is, 0x
 In the BPF64 Assembler Wrapper and also in spec, this has the following generic notation: letters OZ or ZO for "ones, then zeroes" and vice versa, then width, slash `/` and allocated bits for starting from MSB  in definite length,or `+` or `-` signs for "to infinity from left or right". Thus, CIDR netmask is written as `OZm/a` for `m` width and `a` one bits, e.g. `OZ128/48` for IPv6 /48 subnet mask.
 
 TODO generic notation encoding for longer than 64 bits
+
+TBD `BPF_JUMP_BITSET` may be done by ZOZ encoding and just `BPF_JSET` with literal?
+
+TODO ensure single-switch decoding of all insns as in original BPF paper (XFk everywhere?)
 
 ### In BPF_LD and BPF_LDX classes
 
@@ -1131,7 +1140,7 @@ struct bpf_process_mem {
 	uint64_t	g_regs[8];	/* A..H (64 bytes) */
 	struct in6_addr V[4];		/* 128-bit registers (64 bytes) */
 	struct bpf_backstack_frame backstack[BPF_MAX_BACKSTACK]; /* 768 bytes */
-	uint64_t	reg_window[BPF_MAX_REGWINDOW];	/* 2112 bytes */
+	uint64_t	reg_file[BPF_MAX_REGWINDOW];	/* 2112 bytes */
 	uint64_t	mem[BPF_MAX_MEMWORDS];	/* 1024 bytes * */
 };
 ```
@@ -1311,6 +1320,18 @@ First there is export section. Starts with empty namespace, so on corresponding 
 TODO Version Strings
 
 TODO copy needed more from .txt
+
+### The "on_fatal" Section
+
+Contents of this section is a bunch of `bpf_insn`'s in classic BPF called when the main program receives untrappable exception, like stack overflow. These classic BPF instructions are extended in the `BPF_EXIT` instruction to give ability to return additional code with flags, for example, to record a stack backtrace, but otherwise are more restricted than even classic BPF - every instruction which potentially can cause exception is disallowed, e.g. load from packet or arithmetic division.
+
+The purpose of this "signal handler" is to provide meaningful return value to caller in case of exception. By default, if this section is not present, trap handling is as in classic BPF - every such error causes 0 to be returned.
+
+This classic BPF program receives error number in `X` register and possible argument to error in `A` register (e.g. number of stack frames) and allowed to access only 16 words of `M[]` (it's size in classic), so main program before probably fatal actions can setup some defaults in these low addresses.
+
+TBD do we need access to `P[]` as packet or main program's memory? probably not, that's duplication of main packet parsing and potential double faults (or allow latter to reuse classic filter function as is?)
+
+TODO signal/trap error numbers, in somewhat systematic manner
 
 ### The Debug Section(s)
 

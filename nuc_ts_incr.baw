@@ -357,7 +357,7 @@ func process_tcp
  *
  * To achieve this, we declare attributes to loop body, just like as if it was
  * a function, repeating variable names we'll reuse from parent in :input
- * (alas, assembler do not have closures, so you have to it manually) and
+ * (alas, assembler do not have closures, so you have to do it manually) and
  * specifying attribute with amount of register window shift - instead of usual
  * "number of input registers + number of private local registers".
  *
