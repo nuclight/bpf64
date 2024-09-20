@@ -1147,6 +1147,13 @@ struct bpf_process_mem {
 
 TODO `bpf_argv`, `*input_argv`, `scalar_table[]`, space for exception handlers
 
+TODO 18.09.24 save user credentials in ctx/package so that insecure functions (like timer access leading to Spectre vulnerability) can throw trap signal
+
+TBD 19.09.24 some limited form of coroutines? at least split `bpf_filter()` to dispatcher calling bytecode runner or JITted function: both are saving registers, setuping backstack etc. until in same package / need to transfer control between bytecode and compiled or vice versa - to always return to same place in defense against ROP (need to think more about this)
+- 20.09 probably limited form is enough - for iterators, e.g. loop body (itself a coro due to no space for prolog in 1 insn) calls an iterator coroutine for next value, thus making `foreach` but additionally subject to usual max loop limit count; in stack frame need flag, 1 byte offset which `yield` to resume and somehow check that child frame is same coro as in call insn
+  - or just special call insn to resume child? then still need to keep address of it, where? 8 bytes too much
+    - possible if saving `k` of parent's `BPF_CALL`, will require rethinking `BPF_TAILCALL`/EXECVE; and `BPF_LOOP` as it has no such `k` (or move it to parent where looping flag present?)
+
 ## Loading: binary file header, packages
 
 A BPF64 program is just a BLOB, with length multiple of 8 bytes. So kernel, or network card, or whatever capable of executing, just passes it to validator and then may just execute (if test passed). But it is possible for this BLOB to begin from `BPF_LITERAL` of specified format, and then it will be somewhat like executable file header.
