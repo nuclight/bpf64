@@ -172,6 +172,25 @@ bpf64.namespace.foo.bar.baz.*attributes.version: 1668969726
 
 TODO
 
+### Constrained implementations (IoT)
+
+In Internet-of-Things world devices are typically severely constrained in comparison to general-purpose computers due to power saving requirements (e.g. ability to work for years without battery replacement). Such implementations, provided they:
+
+1. support no more than 32 bits width, and
+2. do not need interoperation outside of their limited ecosystem
+
+allowed to relax some of the `MUST`'s of this specification, mainly to save memory. They are allowed to:
+
+* have 32-bit registers only, 32-bit `M[]` entries and reduced count of registers and `M[]`
+* not implement packages system
+* *very* constrained implementation may even live without loops, stack and register window
+
+In fact, all that constrained device may need from BPF64 is just classic BPF with some writing ability. Thus limits such implementations must support are deduced from classic BPF - number of 32-bit entitities accessible by program fits into 32-bit bitmask, that is, at least 16 words of memory `M[]` (32 bit each) and sum of addressable registers, including `X`, up to 32 - for example, 6 global registers `A`..`F`, `X` and `R0`..`R8` for arguments (no selector registers etc. - just hardcoded segment numbers). Given that programs on such device probably will be shorter than 65336 instructions, backstack frame could be reduced to 8 bytes (2 byte return address and no package pointer), reducing total memory for BPF64 to just 256 bytes (e.g. for machines with just 8 bit for index immediates).
+
+Very constrained implementations may choose to eliminate even stack and loop/call mechanism (treating `R#` registers like any other), reducing this memory to just 128 bytes (32 32-bit words). However, it is questionable if reducing stack may compensate for higher memory requirements for BPF program itself (repeating chunks due to no subprograms), so it's up to implementors to decide in every case.
+
+As there is no interoperability in such systems with other BPF64 implementations, instead `BPF_LITERAL` with section headers etc. a custom (used mainly for foll-proof error-checking) alternative may be used, probably in just 1-2 `bpf_insn`'s - byteorder mark, magic number of poarticular system and some system specific feature flags.
+
 ## Changes to classic BPF
 
 There are no directly available backward jumps in BPF64 - they are possible only via calling to new stack frames. Thus the `bpf_insn` structure is reused as is, with exception that `k` field may be sometimes be used as signed, in which case it is called `imm`.
@@ -337,6 +356,10 @@ Note that only one another index register, Y, is added - the encoding don't allo
 
 The `jt` field, depenging on register, segment and mode, allows additional operation types ("t" im mnemonic) - in a way defined by platform. For example, access to per-CPU data or atomic operations (always on segments, not packet) can be here, subject to check by implementation (e.g. that atomic operation do not go to per-CPU segment, etc.).
 
+### in BPF_LDX
+
+TBD 23.09.24 ~23:26 use extended b/vector registers as a (str) key to (hash)map
+
 ### In BPF_ST and BPF_STX classes
 
 Here existing implementations check just `BPF_ST` or `BPF_STX`, that is, `BPF_IMM`
@@ -445,7 +468,144 @@ TBD what is more priority, e.g. `BPF_K` and `XFk` ?
 
 TBD encoding for `k` for strings longer 64 bits
 
-### TODO BPF_JUMPTABLE, JEXT etc. with literals, see in BPF_PACKED
+### `BPF_JTABLE` (0x50)
+
+This is instruction multiple branch targets. In one of it's forms it's just like `TBB` instruction on ARM or `XLAT` on x86. It may be useful for common tasks where branching could be made O(1) with lookup by index, e.g. for separate processing of each TLV chunk by type (in protocols with such structure) or compact constant filtering rules, like 1 bit per entity.
+
+All forms have a `BPF_LITERAL` which MUST immediately follow `BPF_JMP`-class instruction, and all jump offsets are calculated from end of literal (as if there were some NOPs with no literal and `BPF_JMP` was at the place of last 8 bytes of literal).
+
+As this is new instruction, and immediates are in literal, no `XFk` is needed, and only registers are used as source - `BPF_SRC` either selects `BPF_X` or a register from usual field, if it's `BPF_K`.
+
+Table jumps have subtype variants, encoded in `jt` field - for example, literal may contain not just index, but bits or something other. Exact variant may require that literal be strictly in short or long form.
+
+`jt` has two bits of `BPF_MODE` inside - defining which part of register is masked to obtain value to lookup in table. Only some of `BPF_B`, `BPF_H` and `BPF_W` are allowed, depending on subtype. And variant - that is, table type - could be obtained by usual `BPF_CLASS` mask on `jt`.
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |Reservd|   Register number N   | BPF_OP = 0x50 |SRC| BPF_JMP=5 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |     jt    | _SIZE |Table type |               jf              |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+  k   +                                                               +
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |          Low 8 bits           | 0   0 |Hi bits| 1 | BPF_MISC  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      /                                                               /
+      \      Literal data, example given for short literal form       \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+#### `BPF_JUMP_BITSET` (0):
+
+Most simple form - value of register masked by `BPF_SIZE` produces bit position in literal, if that bit is 1, "if matched" branch is taken, and if it is zero, then execution continues at first instruction after literal (as if was no jump, just `BPF_LITERAL`).
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |Reservd|   Register number N   | BPF_OP = 0x50 |SRC| BPF_JMP=5 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |     jt    | _SIZE |     0     |               jf              |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                    Jump offset if matched                     |
+   k  +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |           Base value of A above which to count bits           |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ code |          Low 8 bits           | 0   0 |Hi bits| 1 | BPF_MISC  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      /                                                               /
+      \            Bit string, literal may be short or long           \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+Implementation must take care of proper offset to start of bitstring, taking into account if `BPF_LITERAL` is in short or long form. A straightforward implementation's fragment may look like:
+
+```c
+	    if (A < above)
+		    break;
+	    A -= above; /* subtract base */
+	    match = (A < (cmdlen-1)*64) &&
+		( d[ 1 + (A>>5)] & (1<<(A & 0x1f)) );
+```
+
+so unused (padding) bits at end are just set to 0.
+
+#### `BPF_JUMP_INDEX`
+
+Low `BPF_SIZE` of register (unsigned) is used as index into table, in which jump offset is found. As `BPF_W` sizes can potentially take more space than literals allow, and usefulness of so many jumps is questionable, implementations MAY choose to disallow `BPF_W` sizes.
+
+Can exist in two forms, of short and long literal, which differ by jump offset width - 16 or 32 bits, for proper alignment. `BPF_B` size MUST be used only with short literal form, and `BPF_W` size (if supported) MUST be used only with long form. For `BPF_H` size there is choice between compactness and jump offsets longer than 16 bits.
+
+Short form:
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |Reservd|   Register number N   | BPF_OP = 0x50 |SRC| BPF_JMP=5 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      | jt - type | _SIZE |           |               jf              |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+  k   +    Jump offset if NOT matched (e.g. 'default' in 'switch')    +
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |          Low 8 bits           | 0   0 |Hi bits| 1 | BPF_MISC  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                    Jump offset at index 1                     |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                    Jump offset at index 2                     |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      /                                                               /
+      \                                                               \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                    Jump offset at index N                     |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+```
+
+Long form:
+
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |Reservd|   Register number N   | BPF_OP = 0x50 |SRC| BPF_JMP=5 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      | jt - type | _SIZE |           |               jf              |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+  k   +    Jump offset if NOT matched (e.g. 'default' in 'switch')    +
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |     Usual                     | 1   1   1 |       | BPF_MISC  |
+      +           long BPF_LITERAL    +---+---+---+       +---+---+---+
+      |                            encoding                           |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+      +                    Jump offset at index 1                     +
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+      +                    Jump offset at index 2                     +
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      /                                                               /
+      \                                                               \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                                                               |
+      +                    Jump offset at index N                     +
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+```
+
+For value 0, jump is not stored in table - it is implicitly first instruction after jump table.
+
+### TODO BPF_JUMP_RANGES, JEXT etc. with literals, see in BPF_PACKED
 
 ### In BPF_RET class
 
@@ -543,6 +703,8 @@ TBD about `BPF_TAILCALL` flag:
   continued from next instruction with A set to error number (so that program
   could e.g. deny or accept packet).
 
+TBD 21.09.24 no, no separate `execve()`, and `BPF_TAILCALL` for every functions - so it's possible to `BPF_EXIT` with big `-level` and then replace program from `main()`; better to move some flags to `jt` or `jf` and remaining type bits use for OOP - e.g. `k` pointing to string for method call on "blessed" segment (TBD where to pass `$self` ? in `BS` for "blesses"?)
+
 TBD
 
 #### BPF_PROLOG (2)
@@ -591,6 +753,7 @@ Actually, `BPF_LOOP` is a call: loop body is executed in it's own stack frame. C
 `jt` is interpreted like in `BPF_JMP` class: it is offset to loop body. Loop counter variable is initialized according to `BPF_RVAL`: from `BPF_A`, `BPF_X` or `k` if `BPF_K`. While format allows full 32 bits for counter, implementations will likely want to restrict maximum number of loop iterations to much lower values, e.g. 16 bits or even MTU of the link (typically 1500).
 
 TBD doWhile in Flags? or make `jt` signed so first body before loop is always executed?
+- 19.09.24 coroutine-like for-init with `jf`
 
 While calling each iteration may seem as too much overhead, it is possible to optimize stack manipulation. The following sketch of C code (not a full production code) should give an idea how loop processing should work (see data structures in a later section):
 
@@ -1278,7 +1441,7 @@ should be written out, including the null terminator.  Offsets that refer
 to something in this section should refer to the first byte which begins
 a string.  Beyond the first byte in the section being the null
 terminator, the order of strings is unimportant (however size requirement in
-offsets mey require specific sorting).
+offsets may require specific sorting). In other words, section MUST start and end with ASCII NULL byte.
 
 ### The "impex" Section
 
@@ -1327,6 +1490,8 @@ First there is export section. Starts with empty namespace, so on corresponding 
 TODO Version Strings
 
 TODO copy needed more from .txt
+
+TBD this format for exported scalars, but for imported SVs we also need their `k`, just as number for a function - even if it will not fit in 1 byte of `jf`, program still may want to know what to put into segment selector for them
 
 ### The "on_fatal" Section
 
