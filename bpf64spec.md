@@ -146,7 +146,7 @@ Example:
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
  code |   Field name  |               |     BPF_OP    | SOMECONST = 3 |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-      |                                                               |
+      |               jt              |               jf              |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
       |                                                               |
 k/imm +                                                               +
@@ -154,7 +154,11 @@ k/imm +                                                               +
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 ```
 
+On diagrams where `jt` and `jf` reused for other fields, they are depicted as above, as if it was big-endian machine - however, note that this is just picture convention and fields in `jt` and `jf` are in distinct bytes which would be in opposite order if casted to halfword on little-endian machine.
+
 As C macro names in code are typically ORed together forming too long line (ususal coding convention is 80 chars max per line), they are continued to be called as short as possible, even if it is wrong grammar etc.
+
+TODO systematic where `BPF_` and where `BFP64_` prefixes
 
 ### Packages
 
@@ -189,7 +193,7 @@ In fact, all that constrained device may need from BPF64 is just classic BPF wit
 
 Very constrained implementations may choose to eliminate even stack and loop/call mechanism (treating `R#` registers like any other), reducing this memory to just 128 bytes (32 32-bit words). However, it is questionable if reducing stack may compensate for higher memory requirements for BPF program itself (repeating chunks due to no subprograms), so it's up to implementors to decide in every case.
 
-As there is no interoperability in such systems with other BPF64 implementations, instead `BPF_LITERAL` with section headers etc. a custom (used mainly for foll-proof error-checking) alternative may be used, probably in just 1-2 `bpf_insn`'s - byteorder mark, magic number of poarticular system and some system specific feature flags.
+As there is no interoperability in such systems with other BPF64 implementations, instead `BPF_LITERAL` with section headers etc. a custom (used mainly for fool-proof error-checking) alternative may be used, probably in just 1-2 `bpf_insn`'s - byteorder mark, magic number of poarticular system and some system specific feature flags.
 
 ## Changes to classic BPF
 
@@ -275,7 +279,7 @@ encounters, it corresponds to A register, so compatibility is preserved.
 FIXME seems that JIT on RISC-V (and MIPS different names but same count) must use x0-x8 for it's own needs, which leave us only 23 available registers... including X and Y ?.. //mainly yes but smth wrong
 - 13.09.24 RISC-V leaves 26 registers to JIT including it's own temporaries, MIPS even one less if in userspace, x86 need 1 temporary for "memory-memory", and there too many architectures, e.g. Intel APX raises number of registers. So what will be in ten years? Someone will do 64 registers? So let's move to maximum registers possible by encoding and put JIT authors do deal with that - e.g. AMD64 ABI already uses "some in registers, some in memory" to speed up at least something
 - 14.09.24 this requires for JIT implementation to know which registers is input/local/output, so it's either return to fixed register windows (as in SPARC) or somewhat like annotating each instruction which register is which
-   - probably for first version for simplicity is enough "let JIT use R0..as much as it can" without dividing to classes, but supplement `BPF_PROLOG` with a version which will be `NOP` for bytecode interpreter (and to capable JIT) but hint to limited JIT of which registers may be unused
+   - probably for first version for simplicity is enough "let JIT use R0..as much as it can" without dividing to classes, but supplement `BPF_PROLOG` with a version which will be `NOP` for bytecode interpreter (and to capable JIT) but hint to limited JIT of which registers may be unused UPD see notes of 29.09 about remapping global registers
 
 In addition to registers above, there are also special registers like segment selectors described under `BPF_TAX`/`BPF_TXA`, and pseudoregisters, which abstracts typical RISC's zero register to strings of zeroes ond ones - that is, the main application is for CIDR masks.
 
@@ -359,6 +363,17 @@ The `jt` field, depenging on register, segment and mode, allows additional opera
 ### in BPF_LDX
 
 TBD 23.09.24 ~23:26 use extended b/vector registers as a (str) key to (hash)map
+- 24.09.24 and such key can also be a path in e.g. parsed JSON like
+       $root->{media}->{photo}->{sizes}->[3]->{sizes}->[4]
+  with strings being offsets in literal, of course, and path be like Version String of VarUInt32's
+  - generic references inside segments?..
+    - 26.09.24 a way to reference BPF function for callbacks? e.g. for:
+      > `[json lmap varlist1 json_val1 ?varlist2 json_val2 ...? script]` - As for [json foreach], except that it is collecting - the result from each evaluation of script is added to a list and returned as the result of the [json lmap] command. If the script results in a `TCL_CONTINUE` code, that iteration is skipped and no element is added to the result list.
+      - 27.09 ~04-05 may be, but related moment: as our target userland runner is Perl, likely from XS program - then segments memory model should be suitable for when BPF64 segments are backed by Perl scalars, e.g. from JSON::XS; so need to look how SV are accessed from XS side
+        - 28.09 02:30 so also access to meta-fields, e.g. SvCUR or mbuf's
+        - do it via `BPF_LEN` addressing mode, like new indexes for `X`?
+  - 29.09 for passing callbacks it may be simple - just export them and import and use `k`, but what to do on receiving procedure which did not import it? `k` starting from 0xc0000000 may be to call, but how to add there? also, for remapping global registers: so indexes are now 0-23 globals/Rn and 24-31 for extended 
+- 25.09.24 16:22 what if make these registers remappable? then b/vector could really be just segment, and in future floating-point registers may be added - as they are already availbale in `BPF_ALU` encoding TBD where remap, `BPF_TAX` ?
 
 ### In BPF_ST and BPF_STX classes
 
@@ -396,7 +411,8 @@ k/imm +                                                               +
 ```
 
 Register number is of full 6 bit space, classic programs will have it zero meaning `A` register. `XFk` bit enables eXtended Format, as we can not be sure that every classic BPF code generator leaves `jt` and `jf` zeroed outside of `BPF_JMP` - existing interpeter implementations simply ignore them, so this probably may be possible.
-
+- TODO 28.09.24 we can free one bit here (and in other classes) by the following trick: first, run program against classic `bpf_validate()` - if it passes, then we forcefully change to zero all `jt` and `jf` outside of `BPF_JMP` class (TBD may be put under sysctl knob to speed up a little if admin knows classic generators on this system (e.g. tcpdump/pcap only) are safe?)
+e.g. tcpdump/pcap only
 ```c
 #define	BPF_ADD		0x00
 #define	BPF_SUB		0x10
@@ -422,6 +438,9 @@ TBD two new opcodes sdiv/smod or MSX bit? `BPF_NOT` is missing, and if put it to
 TBD decide if XFk refers to `k` for third register under `BPF_X` in `BPF_SRC`, or to `jt`
 
 Note that for extended registers (e.g. 128 bit IPv6), implementation MUST support only `BPF_AND`, `BPF_OR` and `BPF_LSH`/`BPF_RSH` in multiple of 8 (e.g. `memmove()` could be used byte-wise). However implementation MAY support long arithmetics on them if wish so.
+
+TODO 25.09.24 0xf0 for Floating-Point and Vector extensions in `jt`; sign into `jf` (and bit 6 in `jf` as reserved as we know operation width from bit 14)
+- 26.09 classic BPF paper was on better decoding by single switch/case, so probably move register out of `code` as possible, and for other classes, too (except `BPF_JMP` where it is unavoidable)
 
 TODO
 
@@ -449,7 +468,7 @@ This class, as in classic BPF, retains forward jumps only, and, given that `jt` 
 #define	BPF_JGT		0x20	// pc += (A > SRC) ? jt : jf
 #define	BPF_JGE		0x30	// pc += (A >= SRC) ? jt : jf
 #define	BPF_JSET	0x40	// pc += (A & SRC) ? jt : jf
-#define BPF_JTABLE	0x50	/* in literal, like TBB in ARM */
+#define BPF_JTBL	0x50	/* in literal, like TBB in ARM */
 #define BPF_JSGT	0x60	/* SGT is signed '>', GT in x86 */
 #define BPF_JSGE	0x70	/* SGE is signed '>=', GE in x86 */
 /*			0x80	reserved */
@@ -468,7 +487,7 @@ TBD what is more priority, e.g. `BPF_K` and `XFk` ?
 
 TBD encoding for `k` for strings longer 64 bits
 
-### `BPF_JTABLE` (0x50)
+### `BPF_JTBL` (0x50)
 
 This is instruction multiple branch targets. In one of it's forms it's just like `TBB` instruction on ARM or `XLAT` on x86. It may be useful for common tasks where branching could be made O(1) with lookup by index, e.g. for separate processing of each TLV chunk by type (in protocols with such structure) or compact constant filtering rules, like 1 bit per entity.
 
@@ -508,7 +527,7 @@ Most simple form - value of register masked by `BPF_SIZE` produces bit position 
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
  code |Reservd|   Register number N   | BPF_OP = 0x50 |SRC| BPF_JMP=5 |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-      |     jt    | _SIZE |     0     |               jf              |
+      |     jt    | _SIZE | 0   0   0 |               jf              |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
       |                    Jump offset if matched                     |
    k  +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
@@ -534,7 +553,7 @@ Implementation must take care of proper offset to start of bitstring, taking int
 
 so unused (padding) bits at end are just set to 0.
 
-#### `BPF_JUMP_INDEX`
+#### `BPF_JUMP_INDEX` (1)
 
 Low `BPF_SIZE` of register (unsigned) is used as index into table, in which jump offset is found. As `BPF_W` sizes can potentially take more space than literals allow, and usefulness of so many jumps is questionable, implementations MAY choose to disallow `BPF_W` sizes.
 
@@ -547,7 +566,7 @@ Short form:
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
  code |Reservd|   Register number N   | BPF_OP = 0x50 |SRC| BPF_JMP=5 |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-      | jt - type | _SIZE |           |               jf              |
+      | jt - type | _SIZE | 0   0   1 |               jf              |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
       |                                                               |
   k   +    Jump offset if NOT matched (e.g. 'default' in 'switch')    +
@@ -569,13 +588,12 @@ Short form:
 
 Long form:
 
-
 ```
     MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
  code |Reservd|   Register number N   | BPF_OP = 0x50 |SRC| BPF_JMP=5 |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-      | jt - type | _SIZE |           |               jf              |
+      | jt - type | _SIZE | 0   0   1 |               jf              |
       +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
       |                                                               |
   k   +    Jump offset if NOT matched (e.g. 'default' in 'switch')    +
@@ -605,7 +623,106 @@ Long form:
 
 For value 0, jump is not stored in table - it is implicitly first instruction after jump table.
 
-### TODO BPF_JUMP_RANGES, JEXT etc. with literals, see in BPF_PACKED
+### `BPF_JUMP_RANGES` (2)
+
+There are cases where two previous variants can occupy too much space, for example, often occuring task - check if a number belongs to one or more ranges in short (16 bit) fields, e.g. ports or Ethernet protocol numbers. In first of encodings below 26 port ranges, together with `BPF_JMP` itself, will take 64 bytes, a typical cache line - but equivalent sequence of `BPF_JGT`'s etc. will take at least 256 bytes, and direct index variant or even bitset could take much longer if values are high enough. However, as this variant requires O(N) scanning of table which can be effective only on relatively small number of cache lines, only `BPF_H` version is provided (others MUST be rejected by validator).
+
+There are two flavours, for short and long literal forms - with separate jump offset for each range (like `BPF_JUMP_INDEX`) and just match/non-match for entire rangeset (like `BPF_JUMP_BITSET`).
+
+* Form with long literal is like `BPF_JUMP_BITSET` and if there is no match, then execution continues at first instruction after literal (as if was no jump, just `BPF_LITERAL`):
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |Reservd|   Register number N   | BPF_OP = 0x50 |SRC| BPF_JMP=5 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      | jt - type | 0   1 | 0   1   0 |               jf              |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+  k   +                    Jump offset if matched                     +
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |     Usual                     | 1   1   1 |       | BPF_MISC  |
+      +           long BPF_LITERAL    +---+---+---+       +---+---+---+
+      |                            encoding                           |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 0 low bound, inclusive                  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 0 high bound, inclusive                 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 1 low bound, inclusive                  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 1 high bound, inclusive                 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      /                                                               /
+      \                                                               \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                 Range N low bound, inclusive                  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range N high bound, inclusive                 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+```
+
+Ranges are inclusive, as both ipfw2 and tcpdump/libpcap 'portrange' do it
+inclusive - it allows to use single numbers, e.g. '0-1023,6000,8000-8080'
+is equivalent to '0-1023,6000-6000,8000-8080' and the latter is encoded.
+Whenever padding is needed, the last range could be simply repeated.
+
+A straightforward implementation fragment may look like:
+
+```
+	for (i = cmdlen*2 - 1; !match && i>0; i--, p += 2)
+		match = (x>=p[0] && x<=p[1]);
+```
+
+  Underlying hardware or JIT compiler may utilize whatever optimizations
+  available, of course.
+
+* Form with short literal is like `BPF_JUMP_INDEX`:
+
+```
+    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |Reservd|   Register number N   | BPF_OP = 0x50 |SRC| BPF_JMP=5 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      | jt - type | 0   1 | 0   1   0 |               jf              |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                                                               |
+  k   + Jump offset if NO range matched (e.g. 'default' in 'switch')  +
+      |                                                               |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ code |          Low 8 bits           | 0   0 |Hi bits| 1 | BPF_MISC  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 0 low bound, inclusive                  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 0 high bound, inclusive                 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                Jump offset if range 0 matched                 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 1 low bound, inclusive                  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range 1 high bound, inclusive                 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                Jump offset if range 1 matched                 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      /                                                               /
+      \                                                               \
+      /                                                               /
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                 Range N low bound, inclusive                  |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                 Range N high bound, inclusive                 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      |                Jump offset if range N matched                 |
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      .                                                               .
+      .                 Possible padding, 0/2/4 bytes                 .
+      .                                                               .
+      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+```
+
+### TODO , JEXT etc. with literals, see in BPF_PACKED
 
 ### In BPF_RET class
 
@@ -703,7 +820,7 @@ TBD about `BPF_TAILCALL` flag:
   continued from next instruction with A set to error number (so that program
   could e.g. deny or accept packet).
 
-TBD 21.09.24 no, no separate `execve()`, and `BPF_TAILCALL` for every functions - so it's possible to `BPF_EXIT` with big `-level` and then replace program from `main()`; better to move some flags to `jt` or `jf` and remaining type bits use for OOP - e.g. `k` pointing to string for method call on "blessed" segment (TBD where to pass `$self` ? in `BS` for "blesses"?)
+TBD 21.09.24 no, no separate `execve()`, and `BPF_TAILCALL` for every functions - so it's possible to `BPF_EXIT` with big `-level` and then replace program from `main()`; better to move some flags to `jt` or `jf` and remaining type bits use for OOP - e.g. `k` pointing to string for method call on "blessed" segment TBD where to pass `$self` ? in `BS` for "blessed"? TBD 28-29.09 also due to locking problem, isn't OOP on segments an overkill? and how to friend with when we already in such OOP-lang such as Perl (do thunks for their method calls)? instead, mb another resurrection of coroutines via nested functions, see other notes at 29.09 ? (also mb separate field "global regs" in addition to window)
 
 TBD
 
@@ -750,7 +867,7 @@ Language with no backward jumps, such as classic BPF, is severely restricted for
 
 Actually, `BPF_LOOP` is a call: loop body is executed in it's own stack frame. Current - where the `BPF_LOOP` opcode is - stack frame contains flag and value of loop counter variable. Loop body's stack frame accessed counter as `LC0` in parent frame, as `LC` in parent of parent frame, and so on up to `LC3`, giving up to four nested loops. Typical loop control constructs like `break` or `continue` are all handled with `BPF_EXIT` with corresponding return code (class) - allowing loop body even to adjust loop counter for more than 1, which is read only by normal means.
 
-`jt` is interpreted like in `BPF_JMP` class: it is offset to loop body. Loop counter variable is initialized according to `BPF_RVAL`: from `BPF_A`, `BPF_X` or `k` if `BPF_K`. While format allows full 32 bits for counter, implementations will likely want to restrict maximum number of loop iterations to much lower values, e.g. 16 bits or even MTU of the link (typically 1500).
+`jt` is interpreted like in `BPF_JMP` class: it is offset to loop body. Loop counter variable is initialized according to `BPF_RVAL`: from `BPF_A`, `BPF_X` or `k` if `BPF_K`. While format allows full 32 bits for counter, implementations will likely want to restrict maximum number of loop iterations to much lower values, e.g. 16 bits or even MTU of the link (typically 1500). Implementations MAY also choose a global limit for loop iterations, if malicious code tries e.g. to circumvent "10 iterations per frame" limit by creating nested loops.
 
 TBD doWhile in Flags? or make `jt` signed so first body before loop is always executed?
 - 19.09.24 coroutine-like for-init with `jf`
@@ -1157,104 +1274,7 @@ for the compiler to even know about it. >>
 
 Extended jumps, with multiple checks at once - opcodes remind BPF_JMP (5).
 
-* BPF_JUMP_TABLE:
 
-  Byte-version - low byte of register (unsigned) is used as index into table.
-  This may be useful for separate processing of each TLV chunk by type.
-
-    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
- code | 0   1   0   1 | 1   0 |   Remaining length    |X=1| BPF_MISC=7|
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-      |                    Jump offset at index 1                     |
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-      |                    Jump offset at index 2                     |
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-      /                                                               /
-      \                                                               \
-      /                                                               /
-      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-      |                    Jump offset at index N                     |
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-
-  For value 0, jump is not stored in table - it is implicitly first
-  instruction after jump table. For values greater than N, the same place is
-  used (as if no jump occured).
-
-TBD why same? just add "default not matched" after N, and it also could be
-padding (repeated) value
-
-* BPF_JUMP_RANGES:
-
-  Often occured task - check if a number belongs to one or more ranges in
-  short (16 bit) fields, e.g. ports or Ethernet protocol numbers. As
-  specifying jump offset for each pair would consume too much space, only
-  a single jump offset is provided - if register A & (0xffff) falls into any
-  interval.
-
-    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
- code | 0   1   0   1 | 0   1 |   Remaining length    |X=1| BPF_MISC=7|
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-  off |                    Jump offset if matched                     |
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-      |                 Range 0 low bound, inclusive                  |
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-      |                 Range 0 high bound, inclusive                 |
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-      |                 Range 1 low bound, inclusive                  |
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-      |                 Range 1 high bound, inclusive                 |
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-      /                                                               /
-      \                                                               \
-      /                                                               /
-      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-      |                 Range N low bound, inclusive                  |
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-      |                 Range N high bound, inclusive                 |
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-
-  Ranges are inclusive, as both ipfw2 and tcpdump/libpcap 'portrange' do it
-  inclusive - it allows to use single numbers, e.g. '0-1023,6000,8000-8080'
-  is equivalent to '0-1023,6000-6000,8000-8080' and the latter is encoded.
-  Whenever padding is needed, the last range could be simply repeated.
-
-  A straightforward implementation fragment may look like:
-
-	for (i = cmdlen*2 - 1; !match && i>0; i--, p += 2)
-		match = (x>=p[0] && x<=p[1]);
-
-  Underlying hardware or JIT compiler may utilize whatever optimizations
-  available, of course.
-
-* BPF_JUMP_BITSET:
-
-  More space-efficient version of ranges when overall interval fits into
-  about 8100 above some base value - match is checked against a bit set in
-  a bitmap. First instruction dword looks like
-
-    MSB 15  14  13  12  11  10  9   8   7   6   5   4   3   2   1   0 LSB
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
- code | 0   1   0   1 | 0   1 |   Remaining length    |X=1| BPF_MISC=7|
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-  off |                    Jump offset if matched                     |
-      +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-k/imm |           Base value of A above which to count bits           |
-      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-       1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
-         3                   2                   1
-
-   Subsequent dwords contain bytes with bits, which are checked against the
-   value, with a straightforward implementation's fragment like:
-
-	    if (A < k)
-		    break;
-	    A -= k; /* subtract base */
-	    match = (A < (cmdlen-1)*64) &&
-		( d[ 1 + (A>>5)] & (1<<(A & 0x1f)) );
-
-   so unused (padding) bits at end are just set to 0.
 ```
 
 ## Possible C structures & infrastructure
@@ -1316,6 +1336,9 @@ TBD 19.09.24 some limited form of coroutines? at least split `bpf_filter()` to d
 - 20.09 probably limited form is enough - for iterators, e.g. loop body (itself a coro due to no space for prolog in 1 insn) calls an iterator coroutine for next value, thus making `foreach` but additionally subject to usual max loop limit count; in stack frame need flag, 1 byte offset which `yield` to resume and somehow check that child frame is same coro as in call insn
   - or just special call insn to resume child? then still need to keep address of it, where? 8 bytes too much
     - possible if saving `k` of parent's `BPF_CALL`, will require rethinking `BPF_TAILCALL`/EXECVE; and `BPF_LOOP` as it has no such `k` (or move it to parent where looping flag present?)
+- 29.09 ~23:30 reading about `ENTER` second (nesting) operand on x86 gave idea of R0..R47 being *remappable* registers also in a sense that:
+  1) first part of them being global - so support different numbers of hardware registers is possible, e.g. first 26 to be global on ARM
+  2) other part being mapped not only from register file, but allow access to more stack memory than fits in 64 registers number - meaning a new addressing mode for stack and such registers be just convenient part of it
 
 ## Loading: binary file header, packages
 
@@ -1399,6 +1422,8 @@ struct bpf_file_header_v0 {	/* header is multiple of 128 bytes (16 insns) */
     /* char strings[0]; after */
 };
 ```
+
+TBD 29.09.24 add platform flavor, char[] name "x86-64" or just global registers number in it's JIT? (see other notes this day) and/or take them from end of register file everywhere?
 
 Space in header after `numsections` section headers array is formatted just
 like any other strings section contents (starts and ends with NUL byte), but
@@ -1492,6 +1517,7 @@ TODO Version Strings
 TODO copy needed more from .txt
 
 TBD this format for exported scalars, but for imported SVs we also need their `k`, just as number for a function - even if it will not fit in 1 byte of `jf`, program still may want to know what to put into segment selector for them
+- 24.09.24 problem is that `k` is static per each compiled code package, but segment selectors are runtime thing - and we are against relocations, but they are not the answer as dynamic assigning must be also possible, the `open("/path/to/file")` is more appropriate metaphor here... look at capability systems which constrain allowed files, e.g. Capsicum?..
 
 ### The "on_fatal" Section
 
