@@ -190,10 +190,55 @@ allowed to relax some of the `MUST`'s of this specification, mainly to save memo
 * *very* constrained implementation may even live without loops, stack and register window
 
 In fact, all that constrained device may need from BPF64 is just classic BPF with some writing ability. Thus limits such implementations must support are deduced from classic BPF - number of 32-bit entitities accessible by program fits into 32-bit bitmask, that is, at least 16 words of memory `M[]` (32 bit each) and sum of addressable registers, including `X`, up to 32 - for example, 6 global registers `A`..`F`, `X` and `R0`..`R8` for arguments (no selector registers etc. - just hardcoded segment numbers). Given that programs on such device probably will be shorter than 65336 instructions, backstack frame could be reduced to 8 bytes (2 byte return address and no package pointer), reducing total memory for BPF64 to just 256 bytes (e.g. for machines with just 8 bit for index immediates).
+- TODO 10.10.24 ~01:49 with remapped global and loop `LC0..LC7` registers give example where A.., Rn.., and I, J, K for loops
 
 Very constrained implementations may choose to eliminate even stack and loop/call mechanism (treating `R#` registers like any other), reducing this memory to just 128 bytes (32 32-bit words). However, it is questionable if reducing stack may compensate for higher memory requirements for BPF program itself (repeating chunks due to no subprograms), so it's up to implementors to decide in every case.
 
 As there is no interoperability in such systems with other BPF64 implementations, instead `BPF_LITERAL` with section headers etc. a custom (used mainly for fool-proof error-checking) alternative may be used, probably in just 1-2 `bpf_insn`'s - byteorder mark, magic number of poarticular system and some system specific feature flags.
+
+### TBD
+
+08.10.24 evaluate MPK - https://fengweiz.github.io/paper/moat-usenixsecurity24.pdf :
+```
+Given the increasing security threats in BPF and the chal-
+lenge of enforcing safe BPF programs with merely static
+verification, we seek to employ hardware extensions to sand-
+box untrusted BPF programs. In particular, we leverage Intel
+Memory Protection Keys (MPK ) [11 ], an emerging hardware
+extension that partitions memory into distinct permission
+groups by assigning up to 16 keys to their Page Table En-
+tries ( PTE s). With the aid of MPK , we present MOAT, which
+isolates untrusted BPF programs in a low-cost and principled
+manner. For instance, two MPK protection keys K and E can
+be assigned to the kernel and the BPF programs, respectively.
+When the kernel transfers control to a BPF program, it can
+set K as access-disabled to prevent the potentially malicious
+BPF program from tampering with kernel memory.
+Despite its promising potential, using MPK to enforce BPF
+isolation is not straightforward. In designing MOAT, we faced
+and overcame two major technical hurdles. First, MPK pro-
+vides a maximum of 16 keys. Thus, supporting numerous
+BPF programs with this limited number of keys is challeng-
+ing. Existing workarounds like key virtualization [ 62 ] heavily
+rely on scheduling and notification mechanisms that are only
+available to user space; our
+
+[11] Intel 64 and IA-32 Architectures Software
+Developer Manuals, 2022. URL https:
+//www.intel.com/content/www/us/en/developer/
+articles/technical/intel-sdm.html.
+
+[62] Soyeon Park, Sangho Lee, Wen Xu, HyunGon Moon,
+and Taesoo Kim. libmpk: Software abstraction for intel
+memory protection keys (Intel MPK). In 2019 USENIX
+Annual Technical Conference (USENIX ATC 19), pages
+241–254, Renton, WA, July 2019. USENIX Association.
+```
+
+09.10.24 https://lwn.net/Articles/877062/ :
+> For ultimate performance one can do what JS JITs do. Start a timer when JS is started. Then, when the timer expires, patch the generated code to turn NOP sequences placed before backward jumps into exit jumps. 
+
+WebAssembly `call_indirect` is by index to table, so if we making several tables, is it better than CV in AV ?
 
 ## Changes to classic BPF
 
@@ -280,6 +325,7 @@ FIXME seems that JIT on RISC-V (and MIPS different names but same count) must us
 - 13.09.24 RISC-V leaves 26 registers to JIT including it's own temporaries, MIPS even one less if in userspace, x86 need 1 temporary for "memory-memory", and there too many architectures, e.g. Intel APX raises number of registers. So what will be in ten years? Someone will do 64 registers? So let's move to maximum registers possible by encoding and put JIT authors do deal with that - e.g. AMD64 ABI already uses "some in registers, some in memory" to speed up at least something
 - 14.09.24 this requires for JIT implementation to know which registers is input/local/output, so it's either return to fixed register windows (as in SPARC) or somewhat like annotating each instruction which register is which
    - probably for first version for simplicity is enough "let JIT use R0..as much as it can" without dividing to classes, but supplement `BPF_PROLOG` with a version which will be `NOP` for bytecode interpreter (and to capable JIT) but hint to limited JIT of which registers may be unused UPD see notes of 29.09 about remapping global registers
+     - 10.10.24 02:14 and remapping loop (`LC0`) registers also
 
 In addition to registers above, there are also special registers like segment selectors described under `BPF_TAX`/`BPF_TXA`, and pseudoregisters, which abstracts typical RISC's zero register to strings of zeroes ond ones - that is, the main application is for CIDR masks.
 
@@ -373,7 +419,10 @@ TBD 23.09.24 ~23:26 use extended b/vector registers as a (str) key to (hash)map
         - 28.09 02:30 so also access to meta-fields, e.g. SvCUR or mbuf's
         - do it via `BPF_LEN` addressing mode, like new indexes for `X`?
   - 29.09 for passing callbacks it may be simple - just export them and import and use `k`, but what to do on receiving procedure which did not import it? `k` starting from 0xc0000000 may be to call, but how to add there? also, for remapping global registers: so indexes are now 0-23 globals/Rn and 24-31 for extended 
-- 25.09.24 16:22 what if make these registers remappable? then b/vector could really be just segment, and in future floating-point registers may be added - as they are already availbale in `BPF_ALU` encoding TBD where remap, `BPF_TAX` ?
+    - may be reduce to R40 and have, like LC0, in backstack frame also an offset:size in `M[]` to be "heap" or like C's `alloca()` for "public" data (`:our()` in BAW?) where addressing be e.g. `M[HEAP0+k]` ? or be it separate from `M[]` ? and where iterator will keep it's data in parent's heap between invocations?..
+      - 10.10.24 ~02:14 as `LC0` be also remappable, should think better...
+    - send cb: call to create a CV in SV table, call cb: ...huh, 0xc0000000 is static
+- 25.09.24 16:22 what if make these registers remappable? then b/vector could really be just segment, and in future floating-point registers may be added - as they are already available in `BPF_ALU` encoding TBD where remap, `BPF_TAX` ?
 
 ### In BPF_ST and BPF_STX classes
 
@@ -413,6 +462,7 @@ k/imm +                                                               +
 Register number is of full 6 bit space, classic programs will have it zero meaning `A` register. `XFk` bit enables eXtended Format, as we can not be sure that every classic BPF code generator leaves `jt` and `jf` zeroed outside of `BPF_JMP` - existing interpeter implementations simply ignore them, so this probably may be possible.
 - TODO 28.09.24 we can free one bit here (and in other classes) by the following trick: first, run program against classic `bpf_validate()` - if it passes, then we forcefully change to zero all `jt` and `jf` outside of `BPF_JMP` class (TBD may be put under sysctl knob to speed up a little if admin knows classic generators on this system (e.g. tcpdump/pcap only) are safe?)
 e.g. tcpdump/pcap only
+
 ```c
 #define	BPF_ADD		0x00
 #define	BPF_SUB		0x10
@@ -441,6 +491,7 @@ Note that for extended registers (e.g. 128 bit IPv6), implementation MUST suppor
 
 TODO 25.09.24 0xf0 for Floating-Point and Vector extensions in `jt`; sign into `jf` (and bit 6 in `jf` as reserved as we know operation width from bit 14)
 - 26.09 classic BPF paper was on better decoding by single switch/case, so probably move register out of `code` as possible, and for other classes, too (except `BPF_JMP` where it is unavoidable)
+- 10.10.24 ~01:49 sign/MSX is actual when load is to low half - what if abstract it to offset for *any* general-purpose register? then for standard registers it is fixed e.g. to either low or `loadhi` variant, and for extended vector register offset can be anywhere up to what encoding allows; e.g. it may be relative to `CUR` of register, which is always constant for GPRs
 
 TODO
 
@@ -820,7 +871,8 @@ TBD about `BPF_TAILCALL` flag:
   continued from next instruction with A set to error number (so that program
   could e.g. deny or accept packet).
 
-TBD 21.09.24 no, no separate `execve()`, and `BPF_TAILCALL` for every functions - so it's possible to `BPF_EXIT` with big `-level` and then replace program from `main()`; better to move some flags to `jt` or `jf` and remaining type bits use for OOP - e.g. `k` pointing to string for method call on "blessed" segment TBD where to pass `$self` ? in `BS` for "blessed"? TBD 28-29.09 also due to locking problem, isn't OOP on segments an overkill? and how to friend with when we already in such OOP-lang such as Perl (do thunks for their method calls)? instead, mb another resurrection of coroutines via nested functions, see other notes at 29.09 ? (also mb separate field "global regs" in addition to window)
+TBD 21.09.24 no, no separate `execve()`, and `BPF_TAILCALL` for every functions - so it's possible to `BPF_EXIT` with big `-level` and then replace program from `main()`; better to move some flags to `jt` or `jf` and remaining type bits use for OOP - e.g. `k` pointing to string for method call on "blessed" segment TBD where to pass `$self` ? in `BS` for "blessed"? TBD 28-29.09 also due to locking problem, isn't OOP on segments an overkill? and how to friend with when we already in such OOP-lang such as Perl (do thunks for their method calls)? instead, mb another resurrection of coroutines via nested functions, see other notes at 29.09 ? (also mb separate field "global regs" in addition to window 13.10 if globals mapped from some are which is unused if callee declares less globals, then this probably not needed)
+- 10.10.24 ~01:49 probably a bit should be reserved for "a linear stack register window call" as it is now - for possible future extensions e.g. coroutines in non-linear/memory locals stack; and so `LC0..LC7` registers may be also abstracted to something more generic
 
 TBD
 
@@ -847,6 +899,9 @@ Caller reserves it's output registers number to maximum of any called function c
 Limiting output registers is two-purpose: to not overdo zero initialization of those registers on call (and most importantly, in JIT with limited registers to leave them in backing memory) and to check for errors - an exception will be thrown on access to register after declared.
 
 TBD
+- 10.10.24 ~01:49 remap also `LC0..LC7` registers here
+
+TBD
 
 #### BPF_LOOP (3)
 
@@ -871,6 +926,8 @@ Actually, `BPF_LOOP` is a call: loop body is executed in it's own stack frame. C
 
 TBD doWhile in Flags? or make `jt` signed so first body before loop is always executed?
 - 19.09.24 coroutine-like for-init with `jf`
+
+TBD 13.10.24 in contrast to eBPF's `bpf_for_each_map_elem()` , `foreach` probably should be made here, in additional `BPF_LOOP` mode for iterators, instead of custom C functions which call BPF callback? so `k` here will be as in `BPF_CALL` and loop count limiting mechanism is common in opcode instead of in each C implementation (however, `BPF_NEXT` etc. is still generic for other types of callbacks); so again need to think on callback addresses, (OOP) state keeping for iterators, and coroutines
 
 While calling each iteration may seem as too much overhead, it is possible to optimize stack manipulation. The following sketch of C code (not a full production code) should give an idea how loop processing should work (see data structures in a later section):
 
