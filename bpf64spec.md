@@ -424,6 +424,8 @@ TBD 23.09.24 ~23:26 use extended b/vector registers as a (str) key to (hash)map
     - send cb: call to create a CV in SV table, call cb: ...huh, 0xc0000000 is static
 - 25.09.24 16:22 what if make these registers remappable? then b/vector could really be just segment, and in future floating-point registers may be added - as they are already available in `BPF_ALU` encoding TBD where remap, `BPF_TAX` ?
 
+TODO 24.10.24 more variants to `BPF_MSH` due to new IPnh field lengths
+
 ### In BPF_ST and BPF_STX classes
 
 Here existing implementations check just `BPF_ST` or `BPF_STX`, that is, `BPF_IMM`
