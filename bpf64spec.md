@@ -240,6 +240,10 @@ Annual Technical Conference (USENIX ATC 19), pages
 
 WebAssembly `call_indirect` is by index to table, so if we making several tables, is it better than CV in AV ?
 
+11.12.24
+https://madaidans-insecurities.github.io/firefox-chromium.html backstack idea:
+> As for backward-edge protection, in 2021, Chrome implemented shadow stacks using Intel's Control-flow Enforcement Technology (CET). Shadow stacks protect a program's return address by replicating it in a different, hidden stack. The return addresses in the main stack and the shadow stack are then compared in the function epilogue to see if either differ.
+
 ## Changes to classic BPF
 
 There are no directly available backward jumps in BPF64 - they are possible only via calling to new stack frames. Thus the `bpf_insn` structure is reused as is, with exception that `k` field may be sometimes be used as signed, in which case it is called `imm`.
@@ -425,6 +429,7 @@ TBD 23.09.24 ~23:26 use extended b/vector registers as a (str) key to (hash)map
 - 25.09.24 16:22 what if make these registers remappable? then b/vector could really be just segment, and in future floating-point registers may be added - as they are already available in `BPF_ALU` encoding TBD where remap, `BPF_TAX` ?
 
 TODO 24.10.24 more variants to `BPF_MSH` due to new IPnh field lengths
+- `BPF_W` is 0, so is natural for `4*` part
 
 ### In BPF_ST and BPF_STX classes
 
@@ -1455,7 +1460,7 @@ This file header is always present in all BPF64 files - whether they contain
 code, or debug info, or both. It contains UUID which allows to link files
 together if they are split, and describes all sections which would be present
 in file if contained everything from the program - however, not every section
-may be present in particular file. Sections themselves are just BPF_LITERAL
+may be present in particular file. Sections themselves are just `BPF_LITERAL`
 which contains CRC32 of entire literal in it's `k` field (with first 4 bytes
 of section header substituted to `k` while calculating - this allows producer,
 in case of collision, to change section name offset to get CRC32 value which
